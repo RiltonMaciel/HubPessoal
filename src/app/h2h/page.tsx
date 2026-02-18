@@ -3,6 +3,7 @@
 import * as XLSX from "xlsx";
 import { useEffect, useMemo, useState } from "react";
 import { db } from "@/lib/db";
+import { parseRawTextMatches } from "@/lib/excel";
 import { getSeedMatches } from "@/lib/seed";
 import type { MatchRecord } from "@/lib/types";
 import { formatDateTimePtBr, toDateTimestamp, toIsoDateTime } from "@/lib/datetime";
@@ -15,10 +16,11 @@ import { InfoHint } from "@/components/ui/InfoHint";
 import { Select } from "@/components/ui/Select";
 import { Table } from "@/components/ui/Table";
 
-const lines = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
+const lines = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
 const lastNOptions = ["5", "10", "20", "all"] as const;
 const recencyFactor = 0.9;
-type H2hTab = "analise" | "excel";
+const LOCAL_EXTRA_KEY = "hubpessoal-h2h-extra-matches-v1";
+type H2hTab = "analise" | "excel" | "jogador";
 
 type PlayerStats = {
   games: number;
@@ -76,6 +78,23 @@ type RateInterval = {
   high: number;
 };
 
+type ExtraMarkets = {
+  bttsYesRate: number;
+  bttsNoRate: number;
+  homeOver05Rate: number;
+  homeOver15Rate: number;
+  awayOver05Rate: number;
+  awayOver15Rate: number;
+  oneXRate: number;
+  xTwoRate: number;
+  oneTwoRate: number;
+  dnbHomeRate: number;
+  dnbAwayRate: number;
+  goalsRange0to2Rate: number;
+  goalsRange3to4Rate: number;
+  goalsRange5PlusRate: number;
+};
+
 type H2hScore = {
   score: number;
   edgeFor: "A" | "B" | "equilibrado";
@@ -118,6 +137,17 @@ function confidenceSeal(sample: number): "Alta" | "Média" | "Baixa" {
   if (sample >= 14) return "Alta";
   if (sample >= 8) return "Média";
   return "Baixa";
+}
+
+function buildMatchFingerprint(match: MatchRecord) {
+  return [
+    match.dateTime,
+    normalize(match.homeNick),
+    normalize(match.awayNick),
+    match.homeGoals,
+    match.awayGoals,
+    normalize(match.league),
+  ].join("|");
 }
 
 function includesText(source: string, search: string) {
@@ -302,12 +332,15 @@ function buildTeamPerformance(matches: MatchRecord[], nick: string, teamFilter: 
       ...item,
       ppg: item.games ? (item.wins * 3 + item.draws) / item.games : 0,
       winRate: item.games ? item.wins / item.games : 0,
-    }))
-    .sort((a, b) => b.ppg - a.ppg || b.games - a.games || b.winRate - a.winRate);
+    }));
+
+  const byPpg = [...rows].sort((a, b) => b.ppg - a.ppg || b.games - a.games || b.winRate - a.winRate);
+  const byGames = [...rows].sort((a, b) => b.games - a.games || b.ppg - a.ppg || b.winRate - a.winRate);
 
   return {
-    best: rows[0] ?? null,
-    top: rows.slice(0, 3),
+    best: byPpg[0] ?? null,
+    top: byPpg.slice(0, 3),
+    topByGames: byGames.slice(0, 3),
   };
 }
 
@@ -369,31 +402,62 @@ function buildH2hScore(args: {
 
 export default function HeadToHeadPage() {
   const [matches, setMatches] = useState<MatchRecord[]>([]);
+  const [extraMatches, setExtraMatches] = useState<MatchRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [playerA, setPlayerA] = useState("");
   const [playerB, setPlayerB] = useState("");
   const [teamA, setTeamA] = useState("");
   const [teamB, setTeamB] = useState("");
-  const [line, setLine] = useState(6.5);
+  const [line, setLine] = useState(3.5);
   const [lastN, setLastN] = useState<(typeof lastNOptions)[number]>("10");
   const [activeTab, setActiveTab] = useState<H2hTab>("analise");
+  const [uploadPlayer, setUploadPlayer] = useState("");
+  const [uploadLeague, setUploadLeague] = useState("H2H-Extra");
+  const [uploadYear, setUploadYear] = useState(String(new Date().getFullYear()));
+  const [uploadText, setUploadText] = useState("");
+  const [uploadMessage, setUploadMessage] = useState("");
 
   useEffect(() => {
     void (async () => {
       const rows = await db.matches.toArray();
       setMatches(rows.length ? rows : getSeedMatches());
+
+      if (typeof window !== "undefined") {
+        const raw = window.localStorage.getItem(LOCAL_EXTRA_KEY);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw) as MatchRecord[];
+            setExtraMatches(Array.isArray(parsed) ? parsed : []);
+          } catch {
+            setExtraMatches([]);
+          }
+        }
+      }
+
       setIsLoading(false);
     })();
   }, []);
 
+  const allMatches = useMemo(() => {
+    const dedupe = new Set<string>();
+    const merged: MatchRecord[] = [];
+    [...matches, ...extraMatches].forEach((item) => {
+      const key = buildMatchFingerprint(item);
+      if (dedupe.has(key)) return;
+      dedupe.add(key);
+      merged.push(item);
+    });
+    return merged;
+  }, [matches, extraMatches]);
+
   const nickOptions = useMemo(() => {
     const set = new Set<string>();
-    matches.forEach((m) => {
+    allMatches.forEach((m) => {
       if (m.homeNick) set.add(m.homeNick);
       if (m.awayNick) set.add(m.awayNick);
     });
     return [...set].sort((a, b) => a.localeCompare(b));
-  }, [matches]);
+  }, [allMatches]);
 
   const analysis = useMemo(() => {
     const a = normalize(playerA);
@@ -422,7 +486,7 @@ export default function HeadToHeadPage() {
       };
     }
 
-    const h2hMatches = matches
+    const h2hMatches = allMatches
       .filter((m) => {
         const hasA = normalize(m.homeNick) === a || normalize(m.awayNick) === a;
         const hasB = normalize(m.homeNick) === b || normalize(m.awayNick) === b;
@@ -433,7 +497,7 @@ export default function HeadToHeadPage() {
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
-    const otherA = matches
+    const otherA = allMatches
       .filter((m) => {
         const hasA = normalize(m.homeNick) === a || normalize(m.awayNick) === a;
         const hasB = normalize(m.homeNick) === b || normalize(m.awayNick) === b;
@@ -441,7 +505,7 @@ export default function HeadToHeadPage() {
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
-    const otherB = matches
+    const otherB = allMatches
       .filter((m) => {
         const hasA = normalize(m.homeNick) === a || normalize(m.awayNick) === a;
         const hasB = normalize(m.homeNick) === b || normalize(m.awayNick) === b;
@@ -461,8 +525,8 @@ export default function HeadToHeadPage() {
       else draws += 1;
     });
 
-    const mapA = aggregateAgainstOpponents(matches, playerA, playerB, teamA);
-    const mapB = aggregateAgainstOpponents(matches, playerB, playerA, teamB);
+    const mapA = aggregateAgainstOpponents(allMatches, playerA, playerB, teamA);
+    const mapB = aggregateAgainstOpponents(allMatches, playerB, playerA, teamB);
 
     const commonRows = [...mapA.keys()]
       .filter((key) => mapB.has(key))
@@ -493,7 +557,7 @@ export default function HeadToHeadPage() {
       winsB,
       draws,
     };
-  }, [matches, playerA, playerB, teamA, teamB, line]);
+  }, [allMatches, playerA, playerB, teamA, teamB, line]);
 
   const h2hWindow = useMemo(() => {
     if (!analysis.valid) return [] as MatchRecord[];
@@ -627,33 +691,192 @@ export default function HeadToHeadPage() {
   }, [h2hWindow.length, analysis]);
 
   const teamPerformanceA = useMemo(
-    () => buildTeamPerformance(matches, playerA, teamA),
-    [matches, playerA, teamA]
+    () => buildTeamPerformance(allMatches, playerA, teamA),
+    [allMatches, playerA, teamA]
   );
 
   const teamPerformanceB = useMemo(
-    () => buildTeamPerformance(matches, playerB, teamB),
-    [matches, playerB, teamB]
+    () => buildTeamPerformance(allMatches, playerB, teamB),
+    [allMatches, playerB, teamB]
   );
 
+  const overUnderMatrix = useMemo(() => {
+    const games = h2hWindow.length;
+    const byLine = lines.map((lineRef) => {
+      const overHits = h2hWindow.filter((m) => m.homeGoals + m.awayGoals > lineRef).length;
+      const underHits = games - overHits;
+      return {
+        line: lineRef,
+        overRate: games ? overHits / games : 0,
+        underRate: games ? underHits / games : 0,
+      };
+    });
+
+    const maioresCount = h2hWindow.filter((m) => m.homeGoals + m.awayGoals > 7.5).length;
+    const menoresCount = h2hWindow.filter((m) => m.homeGoals + m.awayGoals <= 1.5).length;
+
+    return {
+      byLine,
+      maioresRate: games ? maioresCount / games : 0,
+      menoresRate: games ? menoresCount / games : 0,
+    };
+  }, [h2hWindow]);
+
+  const extraMarkets = useMemo<ExtraMarkets>(() => {
+    const games = h2hWindow.length;
+    if (!games) {
+      return {
+        bttsYesRate: 0,
+        bttsNoRate: 0,
+        homeOver05Rate: 0,
+        homeOver15Rate: 0,
+        awayOver05Rate: 0,
+        awayOver15Rate: 0,
+        oneXRate: 0,
+        xTwoRate: 0,
+        oneTwoRate: 0,
+        dnbHomeRate: 0,
+        dnbAwayRate: 0,
+        goalsRange0to2Rate: 0,
+        goalsRange3to4Rate: 0,
+        goalsRange5PlusRate: 0,
+      };
+    }
+
+    const totals = {
+      bttsYes: 0,
+      homeOver05: 0,
+      homeOver15: 0,
+      awayOver05: 0,
+      awayOver15: 0,
+      oneX: 0,
+      xTwo: 0,
+      oneTwo: 0,
+      dnbHome: 0,
+      dnbAway: 0,
+      range0to2: 0,
+      range3to4: 0,
+      range5Plus: 0,
+    };
+
+    h2hWindow.forEach((m) => {
+      const total = m.homeGoals + m.awayGoals;
+      const homeWin = m.homeGoals > m.awayGoals;
+      const awayWin = m.homeGoals < m.awayGoals;
+      const draw = m.homeGoals === m.awayGoals;
+
+      if (m.homeGoals > 0 && m.awayGoals > 0) totals.bttsYes += 1;
+      if (m.homeGoals > 0) totals.homeOver05 += 1;
+      if (m.homeGoals > 1) totals.homeOver15 += 1;
+      if (m.awayGoals > 0) totals.awayOver05 += 1;
+      if (m.awayGoals > 1) totals.awayOver15 += 1;
+
+      if (homeWin || draw) totals.oneX += 1;
+      if (awayWin || draw) totals.xTwo += 1;
+      if (homeWin || awayWin) totals.oneTwo += 1;
+
+      if (homeWin) totals.dnbHome += 1;
+      if (awayWin) totals.dnbAway += 1;
+
+      if (total <= 2) totals.range0to2 += 1;
+      else if (total <= 4) totals.range3to4 += 1;
+      else totals.range5Plus += 1;
+    });
+
+    const noDrawGames = h2hWindow.filter((m) => m.homeGoals !== m.awayGoals).length;
+
+    return {
+      bttsYesRate: totals.bttsYes / games,
+      bttsNoRate: 1 - totals.bttsYes / games,
+      homeOver05Rate: totals.homeOver05 / games,
+      homeOver15Rate: totals.homeOver15 / games,
+      awayOver05Rate: totals.awayOver05 / games,
+      awayOver15Rate: totals.awayOver15 / games,
+      oneXRate: totals.oneX / games,
+      xTwoRate: totals.xTwo / games,
+      oneTwoRate: totals.oneTwo / games,
+      dnbHomeRate: noDrawGames ? totals.dnbHome / noDrawGames : 0,
+      dnbAwayRate: noDrawGames ? totals.dnbAway / noDrawGames : 0,
+      goalsRange0to2Rate: totals.range0to2 / games,
+      goalsRange3to4Rate: totals.range3to4 / games,
+      goalsRange5PlusRate: totals.range5Plus / games,
+    };
+  }, [h2hWindow]);
+
+  const quickTip = useMemo(() => {
+    if (!analysis.valid) return "Selecione os dois jogadores.";
+    const over35 = overUnderMatrix.byLine.find((item) => item.line === 3.5)?.overRate ?? 0;
+    const under35 = 1 - over35;
+    if (h2hWindow.length < 6) return "Sem entrada: amostra fraca no H2H.";
+    if (over35 >= 0.62) return "Tendência direta: Over 3.5.";
+    if (under35 >= 0.62) return "Tendência direta: Under 3.5.";
+    return "Sem edge claro: melhor ficar fora.";
+  }, [analysis.valid, overUnderMatrix.byLine, h2hWindow.length]);
+
+  const getOuOutcomeLabel = (total: number) => {
+    if (total > 7.5) return "Maiores";
+    if (total <= 1.5) return "Menores";
+    return total > line ? `Over ${line}` : `Under ${line}`;
+  };
+
+  const importPlayerOnlyMatches = () => {
+    setUploadMessage("");
+    const nick = uploadPlayer.trim();
+    if (!nick) {
+      setUploadMessage("Informe o nick do jogador para filtrar os jogos enviados.");
+      return;
+    }
+
+    const parsed = parseRawTextMatches(uploadText, {
+      league: uploadLeague || "H2H-Extra",
+      referenceYear: Number(uploadYear),
+    });
+
+    const filtered = parsed.matches.filter((item) => {
+      const n = normalize(nick);
+      return normalize(item.homeNick) === n || normalize(item.awayNick) === n;
+    });
+
+    if (!filtered.length) {
+      setUploadMessage("Nenhum jogo encontrado para esse jogador no texto informado.");
+      return;
+    }
+
+    const next = [...extraMatches, ...filtered];
+    const dedupe = new Map<string, MatchRecord>();
+    next.forEach((item) => dedupe.set(buildMatchFingerprint(item), item));
+    const finalRows = [...dedupe.values()].sort((a, b) => toDateTimestamp(b.dateTime) - toDateTimestamp(a.dateTime));
+    setExtraMatches(finalRows);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(LOCAL_EXTRA_KEY, JSON.stringify(finalRows));
+    }
+
+    setUploadMessage(`Importados ${filtered.length} jogo(s) para uso apenas no Confronto Direto.`);
+    setUploadText("");
+  };
+
+  const clearExtraMatches = () => {
+    setExtraMatches([]);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(LOCAL_EXTRA_KEY);
+    }
+    setUploadMessage("Base extra do H2H removida.");
+  };
+
   const recommendation = useMemo(() => {
-    if (!analysis.valid) return "Selecione os dois jogadores para gerar recomendação.";
+    if (!analysis.valid) return "Selecione dois jogadores para analisar.";
     if (h2hScore.level === "favoravel") {
       return h2hScore.edgeFor === "A"
-        ? `Entrada possível: vantagem estatística para ${playerA}.`
+        ? `Entrada: favor ${playerA}.`
         : h2hScore.edgeFor === "B"
-          ? `Entrada possível: vantagem estatística para ${playerB}.`
-          : "Entrada possível, mas sem vantagem clara entre os dois.";
+          ? `Entrada: favor ${playerB}.`
+          : "Entrada leve: sem lado dominante.";
     }
-    if (h2hScore.level === "cautela") return "Entrada com cautela: existe sinal, mas ainda moderado.";
+    if (h2hScore.level === "cautela") return "Cautela: stake reduzida ou aguarde melhor preço.";
 
-    if (sampleLabel === "Alta") {
-      return "Evitar entrada agora: a amostra é robusta, mas os indicadores estão equilibrados e sem edge claro.";
-    }
-    if (sampleLabel === "Média") {
-      return "Evitar entrada agora: há algum sinal, porém ainda sem vantagem consistente para decisão.";
-    }
-    return "Evitar entrada agora: amostra limitada para sustentar um edge confiável.";
+    if (sampleLabel === "Alta") return "Fora: sem edge mesmo com boa amostra.";
+    if (sampleLabel === "Média") return "Fora: sinal instável.";
+    return "Fora: amostra fraca.";
   }, [analysis.valid, h2hScore, playerA, playerB, sampleLabel]);
 
   const exportH2hCsv = () => {
@@ -777,29 +1000,90 @@ export default function HeadToHeadPage() {
           <InfoHint text="Selecione dois jogadores para comparar histórico entre eles (H2H) e desempenho separado contra outros adversários.\nOs times são opcionais e servem para restringir aos jogos em que cada jogador atuou por aquele time." />
           <Chip active={activeTab === "analise"} onClick={() => setActiveTab("analise")}>Aba: Análise</Chip>
           <Chip active={activeTab === "excel"} onClick={() => setActiveTab("excel")}>Aba: Excel H2H</Chip>
+          <Chip active={activeTab === "jogador"} onClick={() => setActiveTab("jogador")}>Aba: Base por Jogador <InfoHint text="Use esta aba para carregar jogos avulsos de UM jogador sem alterar a base principal.\nExemplo: você tem jogos recentes do BOOM e quer testar só no H2H antes de importar no dataset oficial." /></Chip>
+          <Badge>Base extra: {extraMatches.length} jogos <InfoHint text="Quantidade de jogos extras usados apenas na tela H2H.\nExemplo: se mostrar 25, esses 25 entram no confronto direto e não mudam dashboard/import principal." /></Badge>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10, width: "100%" }}>
-          <Select value={playerA} onChange={(e) => setPlayerA(e.target.value)} aria-label="Jogador A">
-            <option value="">Jogador A</option>
-            {nickOptions.map((nick) => <option key={`a-${nick}`} value={nick}>{nick}</option>)}
-          </Select>
-          <Select value={playerB} onChange={(e) => setPlayerB(e.target.value)} aria-label="Jogador B">
-            <option value="">Jogador B</option>
-            {nickOptions.map((nick) => <option key={`b-${nick}`} value={nick}>{nick}</option>)}
-          </Select>
-          <input className="select" placeholder="Time do Jogador A (opcional)" value={teamA} onChange={(e) => setTeamA(e.target.value)} />
-          <input className="select" placeholder="Time do Jogador B (opcional)" value={teamB} onChange={(e) => setTeamB(e.target.value)} />
-          <Select value={String(line)} onChange={(e) => setLine(Number(e.target.value))} aria-label="Linha Over/Under">
-            {lines.map((value) => <option key={value} value={value}>Linha OU {value}</option>)}
-          </Select>
-          <Select value={lastN} onChange={(e) => setLastN(e.target.value as (typeof lastNOptions)[number])} aria-label="Últimos N confrontos">
-            {lastNOptions.map((item) => <option key={item} value={item}>{item === "all" ? "H2H: Tudo" : `H2H: últimos ${item}`}</option>)}
-          </Select>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Select value={playerA} onChange={(e) => setPlayerA(e.target.value)} aria-label="Jogador A">
+              <option value="">Jogador A</option>
+              {nickOptions.map((nick) => <option key={`a-${nick}`} value={nick}>{nick}</option>)}
+            </Select>
+            <InfoHint text="Primeiro jogador do confronto.\nExemplo: BOOM." />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Select value={playerB} onChange={(e) => setPlayerB(e.target.value)} aria-label="Jogador B">
+              <option value="">Jogador B</option>
+              {nickOptions.map((nick) => <option key={`b-${nick}`} value={nick}>{nick}</option>)}
+            </Select>
+            <InfoHint text="Segundo jogador do confronto.\nExemplo: FROST." />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input className="select" placeholder="Time do Jogador A (opcional)" value={teamA} onChange={(e) => setTeamA(e.target.value)} />
+            <InfoHint text="Filtra o Jogador A por time.\nExemplo: Real Madrid.\nSe deixar vazio, considera todos os times." />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input className="select" placeholder="Time do Jogador B (opcional)" value={teamB} onChange={(e) => setTeamB(e.target.value)} />
+            <InfoHint text="Filtra o Jogador B por time.\nExemplo: Man City.\nSe deixar vazio, considera todos os times." />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Select value={String(line)} onChange={(e) => setLine(Number(e.target.value))} aria-label="Linha Over/Under">
+              {lines.map((value) => <option key={value} value={value}>Linha OU {value}</option>)}
+            </Select>
+            <InfoHint text="Linha de decisão Over/Under usada nas leituras rápidas.\nFaixa: 1.5 a 7.5.\nExemplo: Over 3.5 = total de gols maior que 3." />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Select value={lastN} onChange={(e) => setLastN(e.target.value as (typeof lastNOptions)[number])} aria-label="Últimos N confrontos">
+              {lastNOptions.map((item) => <option key={item} value={item}>{item === "all" ? "H2H: Tudo" : `H2H: últimos ${item}`}</option>)}
+            </Select>
+            <InfoHint text="Janela de confrontos diretos usada no cálculo.\nExemplo: últimos 10 pega os 10 jogos mais recentes entre os dois." />
+          </div>
           <Button onClick={exportH2hCsv}>⬇️ CSV H2H</Button>
         </div>
       </Card>
 
-      {activeTab === "excel" ? (
+      {activeTab === "jogador" ? (
+        <Card className="col-12">
+          <CardHeader>
+            <div>
+              <h3 style={{ margin: 0 }}>Base extra por jogador <InfoHint text="Você cola partidas e o sistema importa apenas as que envolvem o nick informado.\nEsses jogos são usados só aqui no H2H e não entram no dashboard principal." /></h3>
+              <small>Importa jogos só para o Confronto Direto sem alterar a base principal.</small>
+            </div>
+          </CardHeader>
+          <CardBody>
+            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input className="select" placeholder="Nick do jogador (obrigatório)" value={uploadPlayer} onChange={(e) => setUploadPlayer(e.target.value)} />
+                <InfoHint text="Nick que será usado para filtrar os jogos importados.\nExemplo: BOOM." />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input className="select" placeholder="Liga" value={uploadLeague} onChange={(e) => setUploadLeague(e.target.value)} />
+                <InfoHint text="Nome da liga salvo nesses jogos extras.\nExemplo: eSoccer Battle 8 mins." />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input className="select" placeholder="Ano base" value={uploadYear} onChange={(e) => setUploadYear(e.target.value)} />
+                <InfoHint text="Ano usado quando a data do texto não vem com ano.\nExemplo: 2026 para linha '02/18 01:16'." />
+              </div>
+            </div>
+            <textarea
+              className="select"
+              rows={12}
+              style={{ width: "100%", resize: "vertical" }}
+              placeholder="Cole as linhas de jogos do site. Ex: 02/18 01:16  Real Madrid (BOOM) v Man City (FROST)  2-1"
+              value={uploadText}
+              onChange={(e) => setUploadText(e.target.value)}
+            />
+            <div className="mini" style={{ marginTop: 8 }}>
+              Exemplo válido: 02/18 01:16 Real Madrid (BOOM) v Man City (FROST) 2-1
+            </div>
+            <div className="chips" style={{ marginTop: 10 }}>
+              <Button variant="primary" onClick={importPlayerOnlyMatches}>Importar jogos do jogador <InfoHint text="Importa somente jogos em que o nick informado aparece como mandante ou visitante.\nLinhas inválidas são descartadas automaticamente." /></Button>
+              <Button onClick={clearExtraMatches}>Limpar base extra</Button>
+            </div>
+            {uploadMessage && <p className="mini" style={{ marginTop: 10 }}>{uploadMessage}</p>}
+          </CardBody>
+        </Card>
+      ) : activeTab === "excel" ? (
         <Card className="col-12">
           <CardHeader>
             <div>
@@ -834,24 +1118,77 @@ export default function HeadToHeadPage() {
         </Card>
       ) : (
         <>
-          <Card className="col-3 stat"><div className="statTop" style={{ display: "flex", alignItems: "center", gap: 8 }}><Badge>H2H Jogos</Badge><InfoHint text="Quantidade de partidas entre os dois jogadores dentro dos filtros aplicados." /></div><div className="kpi">{analysis.h2hMatches.length}</div><div className="kpiSub">Confrontos entre {playerA} e {playerB}</div></Card>
-          <Card className="col-3 stat"><div className="statTop" style={{ display: "flex", alignItems: "center", gap: 8 }}><Badge>{playerA}</Badge><InfoHint text={`Vitórias de ${playerA} no confronto direto (janela atual).`} /></div><div className="kpi">{analysis.winsA}</div><div className="kpiSub">Vitórias no confronto direto</div></Card>
-          <Card className="col-3 stat"><div className="statTop" style={{ display: "flex", alignItems: "center", gap: 8 }}><Badge>{playerB}</Badge><InfoHint text={`Vitórias de ${playerB} no confronto direto (janela atual).`} /></div><div className="kpi">{analysis.winsB}</div><div className="kpiSub">Vitórias no confronto direto</div></Card>
-          <Card className="col-3 stat"><div className="statTop" style={{ display: "flex", alignItems: "center", gap: 8 }}><Badge>Empates</Badge><InfoHint text="Empates no confronto direto entre os dois jogadores." /></div><div className="kpi">{analysis.draws}</div><div className="kpiSub">No confronto direto</div></Card>
+          <Card className="col-3 stat"><div className="statTop"><Badge>H2H</Badge></div><div className="kpi">{h2hWindow.length}</div><div className="kpiSub">Jogos na janela</div></Card>
+          <Card className="col-3 stat"><div className="statTop"><Badge>{playerA}</Badge></div><div className="kpi">{analysis.winsA}</div><div className="kpiSub">Vitórias no H2H</div></Card>
+          <Card className="col-3 stat"><div className="statTop"><Badge>{playerB}</Badge></div><div className="kpi">{analysis.winsB}</div><div className="kpiSub">Vitórias no H2H</div></Card>
+          <Card className="col-3 stat"><div className="statTop"><Badge>Empates</Badge></div><div className="kpi">{analysis.draws}</div><div className="kpiSub">No confronto direto</div></Card>
 
           <Card className="col-12">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Score H2H Final</h3><InfoHint text="Score de 0 a 100 com confronto direto, forma contra outros, oponentes em comum e consistência estatística." /></div><small>Força de sinal no confronto</small></div><Badge tone={sampleLabel === "Alta" ? "good" : sampleLabel === "Média" ? "warn" : "bad"}>Confiança {sampleLabel}</Badge></CardHeader>
-            <CardBody>
-              <div className="chips" style={{ marginBottom: 12 }}>
-                <Badge tone={h2hScore.score >= 70 ? "good" : h2hScore.score >= 50 ? "warn" : "bad"}>Score: {h2hScore.score}/100</Badge>
-                <Badge>{h2hScore.edgeFor === "A" ? `Vantagem: ${playerA}` : h2hScore.edgeFor === "B" ? `Vantagem: ${playerB}` : "Vantagem: sem definição"}</Badge>
-                <Badge tone={h2hScore.level === "favoravel" ? "good" : h2hScore.level === "cautela" ? "warn" : "bad"}>Nível: {h2hScore.level === "favoravel" ? "favorável" : h2hScore.level}</Badge>
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Dica direta <InfoHint text="Resumo objetivo para ação: entrar, cautela ou ficar fora.\nExemplo de saída: 'Tendência direta: Over 3.5'." /></h3>
+                <small>Fala objetiva para decisão rápida</small>
               </div>
-              <p style={{ marginTop: 0, marginBottom: 12, fontWeight: 600 }}>{recommendation}</p>
+              <Badge tone={h2hScore.level === "favoravel" ? "good" : h2hScore.level === "cautela" ? "warn" : "bad"}>{h2hScore.level}</Badge>
+            </CardHeader>
+            <CardBody>
+              <div className="chips" style={{ marginBottom: 10 }}>
+                <Badge tone={h2hScore.score >= 70 ? "good" : h2hScore.score >= 50 ? "warn" : "bad"}>Score {h2hScore.score}/100</Badge>
+                <Badge>Confiança {sampleLabel}</Badge>
+                <Badge>{h2hScore.edgeFor === "A" ? `Vantagem ${playerA}` : h2hScore.edgeFor === "B" ? `Vantagem ${playerB}` : "Sem vantagem clara"}</Badge>
+              </div>
+              <p style={{ marginTop: 0, marginBottom: 8, fontWeight: 700 }}>{quickTip}</p>
+              <p className="mini" style={{ margin: 0 }}>{recommendation}</p>
+            </CardBody>
+          </Card>
+
+          <Card className="col-8">
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Mapa Over / Under <InfoHint text="Mostra taxa de acerto por linha de 1.5 até 7.5.\nAcima de 7.5 aparece como 'Maiores'.\nAté 1.5 aparece como 'Menores'." /></h3>
+                <small>Faixas de 1.5 até 7.5 e extremos fora da faixa</small>
+              </div>
+            </CardHeader>
+            <CardBody>
+              <Table>
+                <thead>
+                  <tr>
+                    <th>Linha</th>
+                    <th className="right">Over</th>
+                    <th className="right">Under</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overUnderMatrix.byLine.map((item) => (
+                    <tr key={item.line}>
+                      <td>{item.line}</td>
+                      <td className="right">{(item.overRate * 100).toFixed(1)}%</td>
+                      <td className="right">{(item.underRate * 100).toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td><b>Maiores (&gt; 7.5)</b></td>
+                    <td className="right"><b>{(overUnderMatrix.maioresRate * 100).toFixed(1)}%</b></td>
+                    <td className="right">-</td>
+                  </tr>
+                  <tr>
+                    <td><b>Menores (≤ 1.5)</b></td>
+                    <td className="right">-</td>
+                    <td className="right"><b>{(overUnderMatrix.menoresRate * 100).toFixed(1)}%</b></td>
+                  </tr>
+                </tbody>
+              </Table>
+            </CardBody>
+          </Card>
+
+          <Card className="col-4">
+            <CardHeader><div><h3 style={{ margin: 0 }}>Comparativo vs campo <InfoHint text="Compara desempenho de cada jogador contra outros adversários (fora do H2H direto).\nExemplo: PPG 2.10 vs 1.20 indica vantagem clara de forma." /></h3><small>Forma fora do confronto direto</small></div></CardHeader>
+            <CardBody>
               <div className="list">
-                {h2hScore.reasons.map((reason) => (
-                  <div key={reason} className="row"><span>{reason}</span></div>
-                ))}
+                <div className="row"><span>{playerA} PPG</span><b>{analysis.statsA?.ppg.toFixed(2) ?? "0.00"}</b></div>
+                <div className="row"><span>{playerB} PPG</span><b>{analysis.statsB?.ppg.toFixed(2) ?? "0.00"}</b></div>
+                <div className="row"><span>{playerA} Over {line}</span><b>{(((analysis.statsA?.overRate ?? 0) * 100)).toFixed(1)}%</b></div>
+                <div className="row"><span>{playerB} Over {line}</span><b>{(((analysis.statsB?.overRate ?? 0) * 100)).toFixed(1)}%</b></div>
               </div>
             </CardBody>
           </Card>
@@ -859,151 +1196,85 @@ export default function HeadToHeadPage() {
           <Card className="col-12">
             <CardHeader>
               <div>
-                <div className="chips" style={{ gap: 8, marginBottom: 4 }}>
-                  <h3 style={{ margin: 0 }}>Melhor time por jogador</h3>
-                  <InfoHint text="Mostra em qual time cada jogador apresenta melhor desempenho no histórico filtrado, priorizando PPG e consistência de amostra." />
-                </div>
-                <small>Comparativo por equipe (jogador 1 e jogador 2)</small>
+                <h3 style={{ margin: 0 }}>Top 3 times mais jogados <InfoHint text="Mostra os 3 times em que cada jogador mais atuou no recorte atual.\nCritério principal: quantidade de jogos.\nCritério de desempate: PPG." /></h3>
+                <small>Volume de jogos por time (jogador A e B)</small>
               </div>
             </CardHeader>
             <CardBody>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 12 }}>
                 <div className="list">
-                  <div className="row"><span>Jogador</span><b>{playerA || "—"}</b></div>
-                  {!teamPerformanceA.best ? (
-                    <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>Melhor time <InfoHint text="Equipe em que o jogador teve melhor desempenho no recorte atual." /></span><b>Sem dados</b></div>
+                  <div className="row"><span>Jogador</span><b>{playerA}</b></div>
+                  {!teamPerformanceA.topByGames.length ? (
+                    <EmptyState title="Sem dados" subtitle="Sem jogos suficientes para montar top 3 do Jogador A." />
                   ) : (
-                    <>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>Melhor time <InfoHint text="Equipe em que o jogador teve melhor desempenho no recorte atual." /></span><b>{teamPerformanceA.best.team}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>PPG <InfoHint text="Pontos por jogo no time informado (3 vitória, 1 empate, 0 derrota)." /></span><b>{teamPerformanceA.best.ppg.toFixed(2)}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>W/D/L <InfoHint text="Vitórias / Empates / Derrotas nesse time." /></span><b>{teamPerformanceA.best.wins}/{teamPerformanceA.best.draws}/{teamPerformanceA.best.losses}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>Jogos <InfoHint text="Quantidade de partidas consideradas para esse time." /></span><b>{teamPerformanceA.best.games}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>GF/GA <InfoHint text="Gols feitos / gols sofridos com esse time." /></span><b>{teamPerformanceA.best.gf}/{teamPerformanceA.best.ga}</b></div>
-                    </>
+                    teamPerformanceA.topByGames.map((item, index) => (
+                      <div className="row" key={`${playerA}-${item.team}`}>
+                        <span>{index + 1}. {item.team}</span>
+                        <b>{item.games} jogos • PPG {item.ppg.toFixed(2)}</b>
+                      </div>
+                    ))
                   )}
                 </div>
 
                 <div className="list">
-                  <div className="row"><span>Jogador</span><b>{playerB || "—"}</b></div>
-                  {!teamPerformanceB.best ? (
-                    <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>Melhor time <InfoHint text="Equipe em que o jogador teve melhor desempenho no recorte atual." /></span><b>Sem dados</b></div>
+                  <div className="row"><span>Jogador</span><b>{playerB}</b></div>
+                  {!teamPerformanceB.topByGames.length ? (
+                    <EmptyState title="Sem dados" subtitle="Sem jogos suficientes para montar top 3 do Jogador B." />
                   ) : (
-                    <>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>Melhor time <InfoHint text="Equipe em que o jogador teve melhor desempenho no recorte atual." /></span><b>{teamPerformanceB.best.team}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>PPG <InfoHint text="Pontos por jogo no time informado (3 vitória, 1 empate, 0 derrota)." /></span><b>{teamPerformanceB.best.ppg.toFixed(2)}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>W/D/L <InfoHint text="Vitórias / Empates / Derrotas nesse time." /></span><b>{teamPerformanceB.best.wins}/{teamPerformanceB.best.draws}/{teamPerformanceB.best.losses}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>Jogos <InfoHint text="Quantidade de partidas consideradas para esse time." /></span><b>{teamPerformanceB.best.games}</b></div>
-                      <div className="row"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>GF/GA <InfoHint text="Gols feitos / gols sofridos com esse time." /></span><b>{teamPerformanceB.best.gf}/{teamPerformanceB.best.ga}</b></div>
-                    </>
+                    teamPerformanceB.topByGames.map((item, index) => (
+                      <div className="row" key={`${playerB}-${item.team}`}>
+                        <span>{index + 1}. {item.team}</span>
+                        <b>{item.games} jogos • PPG {item.ppg.toFixed(2)}</b>
+                      </div>
+                    ))
                   )}
                 </div>
               </div>
             </CardBody>
           </Card>
 
-          <Card className="col-4">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>H2H Média</h3><InfoHint text="Métricas somente dos confrontos entre os dois jogadores. 'Recência' dá mais peso para jogos recentes." /></div><small>Somente entre os dois (com recência)</small></div></CardHeader>
-            <CardBody>
-              <div className="list">
-                <div className="row"><span>Média de gols</span><b>{h2hTotals.avgGoals.toFixed(2)}</b></div>
-                <div className="row"><span>Média gols (recência)</span><b>{h2hTotals.weightedAvgGoals.toFixed(2)}</b></div>
-                <div className="row"><span>BTTS</span><b>{(h2hTotals.bttsRate * 100).toFixed(1)}%</b></div>
-                <div className="row"><span>BTTS recência</span><b>{(h2hTotals.weightedBttsRate * 100).toFixed(1)}%</b></div>
-                <div className="row"><span>Over {line}</span><b>{(h2hTotals.overRate * 100).toFixed(1)}%</b></div>
-                <div className="row"><span>Over recência</span><b>{(h2hTotals.weightedOverRate * 100).toFixed(1)}%</b></div>
-              </div>
-            </CardBody>
-          </Card>
-
-          <Card className="col-4">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>{playerA} vs outros</h3><InfoHint text={`Desempenho de ${playerA} contra outros adversários, excluindo jogos contra ${playerB}.`} /></div><small>Sem jogos contra {playerB}</small></div></CardHeader>
-            <CardBody>
-              {!analysis.statsA?.games ? <EmptyState title="Sem dados" subtitle="Não há jogos do Jogador A contra outros no filtro atual." /> : (
-                <div className="list">
-                  <div className="row"><span>Jogos</span><b>{analysis.statsA.games}</b></div>
-                  <div className="row"><span>W/D/L</span><b>{analysis.statsA.wins}/{analysis.statsA.draws}/{analysis.statsA.losses}</b></div>
-                  <div className="row"><span>PPG</span><b>{analysis.statsA.ppg.toFixed(2)}</b></div>
-                  <div className="row"><span>GF/GA</span><b>{analysis.statsA.gf}/{analysis.statsA.ga}</b></div>
-                  <div className="row"><span>Média gols</span><b>{analysis.statsA.avgTotal.toFixed(2)}</b></div>
-                  <div className="row"><span>BTTS</span><b>{(analysis.statsA.bttsRate * 100).toFixed(1)}%</b></div>
-                  <div className="row"><span>Over {line}</span><b>{(analysis.statsA.overRate * 100).toFixed(1)}%</b></div>
-                </div>
-              )}
-            </CardBody>
-          </Card>
-
-          <Card className="col-4">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>{playerB} vs outros</h3><InfoHint text={`Desempenho de ${playerB} contra outros adversários, excluindo jogos contra ${playerA}.`} /></div><small>Sem jogos contra {playerA}</small></div></CardHeader>
-            <CardBody>
-              {!analysis.statsB?.games ? <EmptyState title="Sem dados" subtitle="Não há jogos do Jogador B contra outros no filtro atual." /> : (
-                <div className="list">
-                  <div className="row"><span>Jogos</span><b>{analysis.statsB.games}</b></div>
-                  <div className="row"><span>W/D/L</span><b>{analysis.statsB.wins}/{analysis.statsB.draws}/{analysis.statsB.losses}</b></div>
-                  <div className="row"><span>PPG</span><b>{analysis.statsB.ppg.toFixed(2)}</b></div>
-                  <div className="row"><span>GF/GA</span><b>{analysis.statsB.gf}/{analysis.statsB.ga}</b></div>
-                  <div className="row"><span>Média gols</span><b>{analysis.statsB.avgTotal.toFixed(2)}</b></div>
-                  <div className="row"><span>BTTS</span><b>{(analysis.statsB.bttsRate * 100).toFixed(1)}%</b></div>
-                  <div className="row"><span>Over {line}</span><b>{(analysis.statsB.overRate * 100).toFixed(1)}%</b></div>
-                </div>
-              )}
-            </CardBody>
-          </Card>
-
           <Card className="col-6">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Split por mando ({playerA})</h3><InfoHint text="Mostra o desempenho no H2H quando joga como mandante e como visitante." /></div><small>Confronto direto no recorte atual</small></div></CardHeader>
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Mercados extras (gols)</h3>
+                <small>BTTS, Team Goals e Faixas de gols</small>
+              </div>
+            </CardHeader>
             <CardBody>
               <div className="list">
-                <div className="row"><span>Como mandante (W/D/L)</span><b>{splitH2H.aHome.wins}/{splitH2H.aHome.draws}/{splitH2H.aHome.losses}</b></div>
-                <div className="row"><span>Como mandante (GF/GA)</span><b>{splitH2H.aHome.gf}/{splitH2H.aHome.ga}</b></div>
-                <div className="row"><span>Como visitante (W/D/L)</span><b>{splitH2H.aAway.wins}/{splitH2H.aAway.draws}/{splitH2H.aAway.losses}</b></div>
-                <div className="row"><span>Como visitante (GF/GA)</span><b>{splitH2H.aAway.gf}/{splitH2H.aAway.ga}</b></div>
+                <div className="row"><span>BTTS Sim</span><b>{(extraMarkets.bttsYesRate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>BTTS Não</span><b>{(extraMarkets.bttsNoRate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>Casa over 0.5 gol</span><b>{(extraMarkets.homeOver05Rate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>Casa over 1.5 gol</span><b>{(extraMarkets.homeOver15Rate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>Fora over 0.5 gol</span><b>{(extraMarkets.awayOver05Rate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>Fora over 1.5 gol</span><b>{(extraMarkets.awayOver15Rate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>Faixa 0-2 gols</span><b>{(extraMarkets.goalsRange0to2Rate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>Faixa 3-4 gols</span><b>{(extraMarkets.goalsRange3to4Rate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>Faixa 5+ gols</span><b>{(extraMarkets.goalsRange5PlusRate * 100).toFixed(1)}%</b></div>
               </div>
             </CardBody>
           </Card>
 
           <Card className="col-6">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Split por mando ({playerB})</h3><InfoHint text="Mostra o desempenho no H2H quando joga como mandante e como visitante." /></div><small>Confronto direto no recorte atual</small></div></CardHeader>
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Mercados extras (resultado)</h3>
+                <small>Dupla Chance e Draw No Bet</small>
+              </div>
+            </CardHeader>
             <CardBody>
               <div className="list">
-                <div className="row"><span>Como mandante (W/D/L)</span><b>{splitH2H.bHome.wins}/{splitH2H.bHome.draws}/{splitH2H.bHome.losses}</b></div>
-                <div className="row"><span>Como mandante (GF/GA)</span><b>{splitH2H.bHome.gf}/{splitH2H.bHome.ga}</b></div>
-                <div className="row"><span>Como visitante (W/D/L)</span><b>{splitH2H.bAway.wins}/{splitH2H.bAway.draws}/{splitH2H.bAway.losses}</b></div>
-                <div className="row"><span>Como visitante (GF/GA)</span><b>{splitH2H.bAway.gf}/{splitH2H.bAway.ga}</b></div>
+                <div className="row"><span>1X (casa ou empate)</span><b>{(extraMarkets.oneXRate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>X2 (fora ou empate)</span><b>{(extraMarkets.xTwoRate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>12 (sem empate)</span><b>{(extraMarkets.oneTwoRate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>DNB Casa (sem empates)</span><b>{(extraMarkets.dnbHomeRate * 100).toFixed(1)}%</b></div>
+                <div className="row"><span>DNB Fora (sem empates)</span><b>{(extraMarkets.dnbAwayRate * 100).toFixed(1)}%</b></div>
               </div>
-            </CardBody>
-          </Card>
-
-          <Card className="col-6">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Probabilidades sugeridas</h3><InfoHint text="Estimativas de Over e BTTS no H2H, com intervalo de confiança de 95% para mostrar incerteza." /></div><small>Com faixa de confiança (IC95%)</small></div></CardHeader>
-            <CardBody>
-              <div className="list">
-                <div className="row"><span>Over {line}</span><b>{(h2hTotals.overRate * 100).toFixed(1)}% • IC95% {(h2hTotals.overInterval.low * 100).toFixed(1)}–{(h2hTotals.overInterval.high * 100).toFixed(1)}%</b></div>
-                <div className="row"><span>BTTS</span><b>{(h2hTotals.bttsRate * 100).toFixed(1)}% • IC95% {(h2hTotals.bttsInterval.low * 100).toFixed(1)}–{(h2hTotals.bttsInterval.high * 100).toFixed(1)}%</b></div>
-                <div className="row"><span>Tamanho amostral (H2H)</span><b>{h2hWindow.length} jogos</b></div>
-              </div>
-            </CardBody>
-          </Card>
-
-          <Card className="col-6">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Tendência H2H</h3><InfoHint text="Mini gráfico com o total de gols por jogo na ordem cronológica da janela selecionada." /></div><small>Totais de gols nos confrontos (janela atual)</small></div></CardHeader>
-            <CardBody>
-              {!trendPoints.length ? <EmptyState title="Sem tendência" subtitle="Não há jogos suficientes no recorte atual." /> : (
-                <>
-                  <div className="chartWrap" style={{ height: 140 }}>
-                    {trendPoints.map((point) => {
-                      const maxTotal = Math.max(...trendPoints.map((item) => item.total), 1);
-                      const height = Math.max(20, Math.round((point.total / maxTotal) * 100));
-                      return <div key={point.id} className="bar" style={{ height: `${height}%` }}><span>{point.total}</span></div>;
-                    })}
-                  </div>
-                  <div className="chartLegend"><span>{trendPoints[0]?.label}</span><span>{trendPoints[trendPoints.length - 1]?.label}</span></div>
-                </>
-              )}
             </CardBody>
           </Card>
 
           <Card className="col-12">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Common Opponents</h3><InfoHint text="Compara os dois jogadores contra os mesmos adversários. PPG maior indica melhor desempenho médio." /></div><small>Comparação dos dois contra os mesmos adversários</small></div><Badge>{analysis.commonRows.length} oponentes em comum</Badge></CardHeader>
+            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Common Opponents</h3><InfoHint text="Compara os dois jogadores contra os mesmos adversários.\nExemplo: BOOM 2.1 PPG vs FROST 1.4 PPG contra o mesmo oponente = vantagem BOOM." /></div><small>Comparação dos dois contra os mesmos adversários</small></div><Badge>{analysis.commonRows.length} oponentes em comum</Badge></CardHeader>
             <CardBody>
               {!analysis.commonRows.length ? <EmptyState title="Sem oponentes em comum" subtitle="Não foi possível encontrar adversários compartilhados no filtro atual." /> : (
                 <Table>
@@ -1033,7 +1304,7 @@ export default function HeadToHeadPage() {
           </Card>
 
           <Card className="col-12">
-            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Histórico entre os dois jogadores</h3><InfoHint text="Lista dos confrontos diretos dentro da janela atual, com data, placar e sinal Over/Under." /></div><small>Confrontos diretos recentes (janela ativa)</small></div></CardHeader>
+            <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Histórico entre os dois jogadores</h3><InfoHint text="Lista dos confrontos diretos na janela atual.\nColuna 'Leitura OU' usa Over/Under da linha selecionada e marca 'Maiores/Menores' fora da faixa." /></div><small>Confrontos diretos recentes (janela ativa)</small></div></CardHeader>
             <CardBody>
               {!h2hWindow.length ? <EmptyState title="Sem confronto direto" subtitle="Nenhum jogo encontrado com os filtros atuais (jogadores/times)." /> : (
                 <Table>
@@ -1045,7 +1316,7 @@ export default function HeadToHeadPage() {
                       <th>Fora</th>
                       <th className="right">Placar</th>
                       <th className="right">Total</th>
-                      <th className="right">OU {line}</th>
+                      <th className="right">Leitura OU</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1059,7 +1330,7 @@ export default function HeadToHeadPage() {
                           <td>{m.awayNick} ({m.awayTeam})</td>
                           <td className="right">{m.homeGoals}–{m.awayGoals}</td>
                           <td className="right">{total}</td>
-                          <td className="right"><Badge tone={total > line ? "good" : "bad"}>{total > line ? "Over" : "Under"}</Badge></td>
+                          <td className="right"><Badge tone={total > line ? "good" : "warn"}>{getOuOutcomeLabel(total)}</Badge></td>
                         </tr>
                       );
                     })}

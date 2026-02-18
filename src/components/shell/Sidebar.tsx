@@ -6,7 +6,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useAppStore } from "@/store/appStore";
 
 const links = [
-  { section: "Analytics", items: [{ href: "/import", label: "📥 Importar" }, { href: "/dashboard", label: "📊 Dashboard" }, { href: "/h2h", label: "🤝 Confronto" }, { href: "/player/MJ", label: "👤 Player" }] },
+  { section: "Analytics", items: [{ href: "/import", label: "📥 Importar" }, { href: "/dashboard", label: "📊 Dashboard" }, { href: "/h2h", label: "🤝 Confronto" }, { href: "/betsapi", label: "🕸️ BetsAPI" }, { href: "/player/MJ", label: "👤 Player" }] },
   { section: "Organização", items: [{ href: "/notes", label: "📝 Notas" }, { href: "/calendar", label: "🗓️ Calendário" }] },
   { section: "Privado", items: [{ href: "/secure", label: "🔒 Secure" }] },
 ];

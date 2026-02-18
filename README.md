@@ -90,6 +90,14 @@ Na tela `/import`:
 5. Calcula cache de dashboard
 6. Redireciona automaticamente para `/dashboard`
 
+Alternativa sem Excel (texto bruto do site):
+
+1. Na mesma tela `/import`, use o bloco **Importar texto bruto (site)**
+2. Cole linhas no formato `MM/DD HH:mm ... Home (NICK) v Away (NICK) ... X-Y`
+3. Informe liga e ano-base (quando a data não tiver ano)
+4. Clique em **Importar texto**
+5. Linhas inválidas (sem placar/data) são descartadas e reportadas no summary
+
 Botão **Baixar Modelo Excel (V1)** gera planilha vazia com schema correto.
 
 ## Schema Excel (V1)

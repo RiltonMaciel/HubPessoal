@@ -69,6 +69,8 @@ type ImportedData = {
   importSummary: ImportSummary;
 };
 
+export type ParsedImportData = ImportedData;
+
 function toStringValue(value: unknown) {
   if (value === null || value === undefined) return "";
   return String(value).trim();
@@ -276,6 +278,169 @@ export function parseWorkbook(workbook: XLSX.WorkBook): ImportedData {
   };
 
   return { matches, upcoming, odds1x2, oddsOu, config, players, quality, importSummary };
+}
+
+type ParseRawTextOptions = {
+  league?: string;
+  referenceYear?: number;
+};
+
+function parseSiteDateTime(raw: string, referenceYear: number) {
+  const trimmed = raw.trim();
+  const withYear = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2}):(\d{2})$/);
+  if (withYear) {
+    const [, mm, dd, yy, hh, min] = withYear;
+    const year = yy.length === 2 ? 2000 + Number(yy) : Number(yy);
+    const date = new Date(year, Number(mm) - 1, Number(dd), Number(hh), Number(min), 0);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  const noYear = trimmed.match(/^(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (noYear) {
+    const [, mm, dd, hh, min] = noYear;
+    const now = new Date();
+    let date = new Date(referenceYear, Number(mm) - 1, Number(dd), Number(hh), Number(min), 0);
+    if (date.getTime() - now.getTime() > 36 * 60 * 60 * 1000) {
+      date = new Date(referenceYear - 1, Number(mm) - 1, Number(dd), Number(hh), Number(min), 0);
+    }
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  return null;
+}
+
+function parseTeamAndNick(value: string) {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(.*?)\s*(?:\(([^)]+)\))?$/);
+  const team = match?.[1]?.trim() || trimmed;
+  const nick = match?.[2]?.trim() || team;
+  return { team, nick };
+}
+
+function pickRawLineParts(line: string) {
+  const columns = line
+    .split("\t")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (columns.length >= 3) {
+    const dateTime = columns[0] ?? "";
+    const matchup = columns.find((item) => /\sv\s/i.test(item)) ?? "";
+    const score = columns.find((item) => /^\d+\s*-\s*\d+$/.test(item)) ?? "";
+    return { dateTime, matchup, score };
+  }
+
+  const fallback = line.match(
+    /(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\s+\d{1,2}:\d{2}).*?(.+?\s+v\s+.+?)\s+(\d+\s*-\s*\d+)\s*$/i
+  );
+  if (!fallback) return null;
+
+  return {
+    dateTime: fallback[1] ?? "",
+    matchup: fallback[2] ?? "",
+    score: fallback[3] ?? "",
+  };
+}
+
+export function parseRawTextMatches(rawText: string, options?: ParseRawTextOptions): ParsedImportData {
+  const referenceYear = options?.referenceYear ?? new Date().getFullYear();
+  const league = options?.league?.trim() || "eSoccer";
+  const rows = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^date\b/i.test(line));
+
+  const dedupe = new Set<string>();
+  const quality: DataQualityReport = {
+    ignoredStatusNotFinished: 0,
+    removedMissingScore: 0,
+    removedDuplicates: 0,
+    detectedOutliers: 0,
+  };
+
+  const matches: MatchRecord[] = [];
+
+  rows.forEach((row) => {
+    const parsedLine = pickRawLineParts(row);
+    if (!parsedLine) {
+      quality.removedMissingScore += 1;
+      return;
+    }
+
+    const date = parseSiteDateTime(parsedLine.dateTime, referenceYear);
+    const matchup = parsedLine.matchup.match(/(.+?)\s+v\s+(.+)/i);
+    const score = parsedLine.score.match(/^(\d+)\s*-\s*(\d+)$/);
+
+    if (!date || !matchup || !score) {
+      quality.removedMissingScore += 1;
+      return;
+    }
+
+    const home = parseTeamAndNick(matchup[1] ?? "");
+    const away = parseTeamAndNick(matchup[2] ?? "");
+    const homeGoals = Number(score[1]);
+    const awayGoals = Number(score[2]);
+
+    if (!home.team || !away.team || Number.isNaN(homeGoals) || Number.isNaN(awayGoals)) {
+      quality.removedMissingScore += 1;
+      return;
+    }
+
+    const key = `${league}|${date.toISOString()}|${home.nick}|${away.nick}|${homeGoals}|${awayGoals}`;
+    if (dedupe.has(key)) {
+      quality.removedDuplicates += 1;
+      return;
+    }
+    dedupe.add(key);
+
+    if (homeGoals + awayGoals > 20) {
+      quality.detectedOutliers += 1;
+    }
+
+    matches.push({
+      id: uuidv4(),
+      league,
+      dateTime: date.toISOString(),
+      homeTeam: home.team,
+      homeNick: home.nick,
+      awayTeam: away.team,
+      awayNick: away.nick,
+      homeGoals,
+      awayGoals,
+      status: "FINISHED",
+    });
+  });
+
+  const players = [...new Set(matches.flatMap((item) => [item.homeNick, item.awayNick]))]
+    .filter(Boolean)
+    .map((nick) => ({ nick, displayName: nick }));
+
+  const validDates = matches
+    .map((item) => parseDateTimeInput(item.dateTime))
+    .filter((date): date is Date => Boolean(date))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((a, b) => +a - +b);
+
+  const importSummary: ImportSummary = {
+    linesRead: rows.length,
+    linesValid: matches.length,
+    linesRemoved: quality.removedMissingScore + quality.removedDuplicates,
+    leaguesDetected: matches.length ? [league] : [],
+    minDate: validDates[0]?.toISOString(),
+    maxDate: validDates[validDates.length - 1]?.toISOString(),
+  };
+
+  return {
+    matches,
+    upcoming: [],
+    odds1x2: [],
+    oddsOu: [],
+    config: { ...defaultConfig },
+    players,
+    quality,
+    importSummary,
+  };
 }
 
 export function downloadTemplate() {
