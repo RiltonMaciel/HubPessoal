@@ -12,13 +12,16 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Chip } from "@/components/ui/Chip";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { InfoHint } from "@/components/ui/InfoHint";
+import { PlayerAvatar } from "@/components/ui/PlayerAvatar";
 import { Select } from "@/components/ui/Select";
 import { Table } from "@/components/ui/Table";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 
 const lines = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
 const lastNOptions = ["5", "10", "20", "all"] as const;
 const recencyFactor = 0.9;
 const LOCAL_EXTRA_KEY = "hubpessoal-h2h-extra-matches-v1";
+const H2H_PAGE_SIZE = 30;
 type H2hTab = "analise" | "excel" | "jogador";
 
 type PlayerStats = {
@@ -433,12 +436,15 @@ export default function HeadToHeadPage() {
   const [teamB, setTeamB] = useState("");
   const [line, setLine] = useState(3.5);
   const [lastN, setLastN] = useState<(typeof lastNOptions)[number]>("10");
+  const [h2hPage, setH2hPage] = useState(1);
   const [activeTab, setActiveTab] = useState<H2hTab>("analise");
   const [uploadPlayer, setUploadPlayer] = useState("");
   const [uploadLeague, setUploadLeague] = useState("H2H-Extra");
   const [uploadYear, setUploadYear] = useState(String(new Date().getFullYear()));
   const [uploadText, setUploadText] = useState("");
   const [uploadMessage, setUploadMessage] = useState("");
+  const debouncedTeamA = useDebouncedValue(teamA, 250);
+  const debouncedTeamB = useDebouncedValue(teamB, 250);
 
   useEffect(() => {
     void (async () => {
@@ -519,21 +525,21 @@ export default function HeadToHeadPage() {
     const h2hMatches = matchesA
       .filter((m) => {
         if (!setB.has(m)) return false;
-        if (!playerMatchesTeam(m, playerA, teamA)) return false;
-        if (!playerMatchesTeam(m, playerB, teamB)) return false;
+        if (!playerMatchesTeam(m, playerA, debouncedTeamA)) return false;
+        if (!playerMatchesTeam(m, playerB, debouncedTeamB)) return false;
         return true;
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
     const otherA = matchesA
       .filter((m) => {
-        return !setB.has(m) && playerMatchesTeam(m, playerA, teamA);
+        return !setB.has(m) && playerMatchesTeam(m, playerA, debouncedTeamA);
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
     const otherB = matchesB
       .filter((m) => {
-        return !setA.has(m) && playerMatchesTeam(m, playerB, teamB);
+        return !setA.has(m) && playerMatchesTeam(m, playerB, debouncedTeamB);
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
@@ -549,8 +555,8 @@ export default function HeadToHeadPage() {
       else draws += 1;
     });
 
-    const mapA = aggregateAgainstOpponents(matchesA, playerA, playerB, teamA);
-    const mapB = aggregateAgainstOpponents(matchesB, playerB, playerA, teamB);
+    const mapA = aggregateAgainstOpponents(matchesA, playerA, playerB, debouncedTeamA);
+    const mapB = aggregateAgainstOpponents(matchesB, playerB, playerA, debouncedTeamB);
 
     const commonRows = [...mapA.keys()]
       .filter((key) => mapB.has(key))
@@ -581,13 +587,27 @@ export default function HeadToHeadPage() {
       winsB,
       draws,
     };
-  }, [nickIndex, playerA, playerB, teamA, teamB, line]);
+  }, [nickIndex, playerA, playerB, debouncedTeamA, debouncedTeamB, line]);
 
   const h2hWindow = useMemo(() => {
     if (!analysis.valid) return [] as MatchRecord[];
     if (lastN === "all") return analysis.h2hMatches;
     return analysis.h2hMatches.slice(0, Number(lastN));
   }, [analysis, lastN]);
+
+  useEffect(() => {
+    setH2hPage(1);
+  }, [playerA, playerB, debouncedTeamA, debouncedTeamB, lastN]);
+
+  const h2hTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(h2hWindow.length / H2H_PAGE_SIZE)),
+    [h2hWindow.length]
+  );
+
+  const h2hVisibleRows = useMemo(() => {
+    const start = (h2hPage - 1) * H2H_PAGE_SIZE;
+    return h2hWindow.slice(start, start + H2H_PAGE_SIZE);
+  }, [h2hWindow, h2hPage]);
 
   const h2hTotals = useMemo(() => {
     const totalGames = h2hWindow.length;
@@ -715,13 +735,13 @@ export default function HeadToHeadPage() {
   }, [h2hWindow.length, analysis]);
 
   const teamPerformanceA = useMemo(
-    () => buildTeamPerformance(nickIndex.get(normalize(playerA)) ?? [], playerA, teamA),
-    [nickIndex, playerA, teamA]
+    () => buildTeamPerformance(nickIndex.get(normalize(playerA)) ?? [], playerA, debouncedTeamA),
+    [nickIndex, playerA, debouncedTeamA]
   );
 
   const teamPerformanceB = useMemo(
-    () => buildTeamPerformance(nickIndex.get(normalize(playerB)) ?? [], playerB, teamB),
-    [nickIndex, playerB, teamB]
+    () => buildTeamPerformance(nickIndex.get(normalize(playerB)) ?? [], playerB, debouncedTeamB),
+    [nickIndex, playerB, debouncedTeamB]
   );
 
   const overUnderMatrix = useMemo(() => {
@@ -1331,35 +1351,44 @@ export default function HeadToHeadPage() {
             <CardHeader><div><div className="chips" style={{ gap: 8, marginBottom: 4 }}><h3 style={{ margin: 0 }}>Histórico entre os dois jogadores</h3><InfoHint text="Lista dos confrontos diretos na janela atual.\nColuna 'Leitura OU' usa Over/Under da linha selecionada e marca 'Maiores/Menores' fora da faixa." /></div><small>Confrontos diretos recentes (janela ativa)</small></div></CardHeader>
             <CardBody>
               {!h2hWindow.length ? <EmptyState title="Sem confronto direto" subtitle="Nenhum jogo encontrado com os filtros atuais (jogadores/times)." /> : (
-                <Table>
-                  <thead>
-                    <tr>
-                      <th>Data/Hora</th>
-                      <th>Liga</th>
-                      <th>Casa</th>
-                      <th>Fora</th>
-                      <th className="right">Placar</th>
-                      <th className="right">Total</th>
-                      <th className="right">Leitura OU</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {h2hWindow.slice(0, 30).map((m) => {
-                      const total = m.homeGoals + m.awayGoals;
-                      return (
-                        <tr key={m.id}>
-                          <td>{formatDateTimePtBr(m.dateTime)}</td>
-                          <td>{m.league}</td>
-                          <td>{m.homeNick} ({m.homeTeam})</td>
-                          <td>{m.awayNick} ({m.awayTeam})</td>
-                          <td className="right">{m.homeGoals}–{m.awayGoals}</td>
-                          <td className="right">{total}</td>
-                          <td className="right"><Badge tone={total > line ? "good" : "warn"}>{getOuOutcomeLabel(total)}</Badge></td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </Table>
+                <>
+                  <Table>
+                    <thead>
+                      <tr>
+                        <th>Data/Hora</th>
+                        <th>Liga</th>
+                        <th>Casa</th>
+                        <th>Fora</th>
+                        <th className="right">Placar</th>
+                        <th className="right">Total</th>
+                        <th className="right">Leitura OU</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {h2hVisibleRows.map((m) => {
+                        const total = m.homeGoals + m.awayGoals;
+                        return (
+                          <tr key={m.id}>
+                            <td>{formatDateTimePtBr(m.dateTime)}</td>
+                            <td>{m.league}</td>
+                            <td><div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}><PlayerAvatar nick={m.homeNick} size={24} radius={10} /><span>{m.homeNick} ({m.homeTeam})</span></div></td>
+                            <td><div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}><PlayerAvatar nick={m.awayNick} size={24} radius={10} /><span>{m.awayNick} ({m.awayTeam})</span></div></td>
+                            <td className="right">{m.homeGoals}–{m.awayGoals}</td>
+                            <td className="right">{total}</td>
+                            <td className="right"><Badge tone={total > line ? "good" : "warn"}>{getOuOutcomeLabel(total)}</Badge></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </Table>
+                  {h2hWindow.length > H2H_PAGE_SIZE && (
+                    <div className="chips" style={{ marginTop: 10 }}>
+                      <Button onClick={() => setH2hPage((prev) => Math.max(1, prev - 1))} disabled={h2hPage <= 1}>← Anterior</Button>
+                      <Badge>Página {h2hPage} de {h2hTotalPages}</Badge>
+                      <Button onClick={() => setH2hPage((prev) => Math.min(h2hTotalPages, prev + 1))} disabled={h2hPage >= h2hTotalPages}>Próxima →</Button>
+                    </div>
+                  )}
+                </>
               )}
             </CardBody>
           </Card>

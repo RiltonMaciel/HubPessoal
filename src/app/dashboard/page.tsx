@@ -16,6 +16,7 @@ import { InfoHint } from "@/components/ui/InfoHint";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Table } from "@/components/ui/Table";
+import { PlayerAvatar } from "@/components/ui/PlayerAvatar";
 
 const lines = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
 type TabKey = "best" | "worst" | "over" | "under" | "btts";
@@ -527,7 +528,7 @@ export default function DashboardPage() {
             {topPicks.map((player) => (
               <div key={player.nick} className="row">
                 <div className="left">
-                  <div className="avatar">{player.nick.slice(0, 2).toUpperCase()}</div>
+                  <PlayerAvatar nick={player.nick} />
                   <div className="nick"><b>{player.nick}</b><small>PPG {player.ppgFinal.toFixed(2)} • Over {line}: {((player.overRates[line] ?? 0) * 100).toFixed(0)}%</small></div>
                 </div>
                 <div className="metric"><b><Badge tone={confidenceTone(player.confidence)}>{player.confidence}</Badge></b><small>n={player.games}</small></div>
@@ -613,7 +614,7 @@ export default function DashboardPage() {
                 <div key={item.nick} className="row">
                   <div className="left">
                     <div className="rank">{index + 1}</div>
-                    <div className="avatar">{item.nick.slice(0, 2).toUpperCase()}</div>
+                    <PlayerAvatar nick={item.nick} />
                     <div className="nick"><b>{item.nick}</b><small>{metric.label}</small></div>
                   </div>
                   <div className="metric"><b>{metric.value}</b><small>{metric.label}</small></div>
@@ -631,7 +632,7 @@ export default function DashboardPage() {
           <div className="list">
             {upcomingVisible.map((event) => (
               <div key={event.id} className="row">
-                <div className="left"><div className="avatar">{event.homeNick.slice(0, 1)}{event.awayNick.slice(0, 1)}</div><div className="nick"><b>{event.homeNick} vs {event.awayNick}</b><small>{event.homeTeam} x {event.awayTeam} • {formatDateTimePtBr(event.dateTime)}</small></div></div>
+                <div className="left"><div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><PlayerAvatar nick={event.homeNick} size={28} radius={12} /><PlayerAvatar nick={event.awayNick} size={28} radius={12} /></div><div className="nick"><b>{event.homeNick} vs {event.awayNick}</b><small>{event.homeTeam} x {event.awayTeam} • {formatDateTimePtBr(event.dateTime)}</small></div></div>
                 <div className="metric"><b className="badge">{event.league}</b><small>OU {line}</small></div>
               </div>
             ))}
@@ -654,8 +655,8 @@ export default function DashboardPage() {
                   <tr key={match.id}>
                     <td>{formatDateTimePtBr(match.dateTime)}</td>
                     <td>{match.league}</td>
-                    <td>{match.homeNick}</td>
-                    <td>{match.awayNick}</td>
+                    <td><div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}><PlayerAvatar nick={match.homeNick} size={24} radius={10} /><span>{match.homeNick}</span></div></td>
+                    <td><div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}><PlayerAvatar nick={match.awayNick} size={24} radius={10} /><span>{match.awayNick}</span></div></td>
                     <td className="right">{match.homeGoals}–{match.awayGoals}</td>
                     <td className="right">{total}</td>
                     <td className="right"><Badge tone={over ? "good" : "bad"}>{over ? "Over" : "Under"}</Badge></td>

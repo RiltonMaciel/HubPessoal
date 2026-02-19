@@ -7,7 +7,10 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { PlayerAvatar } from "@/components/ui/PlayerAvatar";
 import { Table } from "@/components/ui/Table";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import {
   Bar,
   BarChart,
@@ -37,6 +40,7 @@ type LiveRow = {
 type LiveResponse = {
   ok: boolean;
   updatedAt: string;
+  collectedInMs?: number;
   pagesProcessed: number;
   total: number;
   rows: LiveRow[];
@@ -102,6 +106,8 @@ type DeepStats = {
 
 const DEFAULT_URL = "https://betsapi.com/ls/37298/Esoccer-H2H-GG-League--8-mins-play";
 const POLL_MS = 1000;
+const AOVIVO_SNAPSHOT_KEY = "hubpessoal-aovivo-snapshot-v1";
+const AOVIVO_PAGE_SIZE = 50;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -384,13 +390,21 @@ export default function AoVivoPage() {
   const [url, setUrl] = useState(DEFAULT_URL);
   const [maxPages, setMaxPages] = useState(1);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [lightMode, setLightMode] = useState(false);
+  const [safeMode, setSafeMode] = useState(true);
+  const [refreshMs, setRefreshMs] = useState(POLL_MS);
   const [rows, setRows] = useState<LiveRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [lastSuccessAt, setLastSuccessAt] = useState<string | null>(null);
+  const [lastFetchMs, setLastFetchMs] = useState(0);
+  const [lastServerMs, setLastServerMs] = useState(0);
+  const [boardPage, setBoardPage] = useState(1);
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [selectedRow, setSelectedRow] = useState<LiveRow | null>(null);
   const inFlightRef = useRef(false);
+  const debouncedUrl = useDebouncedValue(url, 300);
+  const debouncedMaxPages = useDebouncedValue(maxPages, 300);
 
   useEffect(() => {
     void (async () => {
@@ -398,6 +412,26 @@ export default function AoVivoPage() {
       setMatches(rowsDb);
     })();
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(AOVIVO_SNAPSHOT_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        url: string;
+        maxPages: number;
+        rows: LiveRow[];
+        updatedAt?: string;
+      };
+      if (!parsed || !Array.isArray(parsed.rows)) return;
+      if (parsed.url === debouncedUrl && parsed.maxPages === debouncedMaxPages) {
+        setRows(parsed.rows);
+        if (parsed.updatedAt) setLastSuccessAt(parsed.updatedAt);
+      }
+    } catch {
+      window.localStorage.removeItem(AOVIVO_SNAPSHOT_KEY);
+    }
+  }, [debouncedUrl, debouncedMaxPages]);
 
   async function fetchLiveBoard(options?: { manual?: boolean }) {
     const manual = options?.manual ?? false;
@@ -409,10 +443,11 @@ export default function AoVivoPage() {
     }
 
     try {
+      const startedAt = performance.now();
       const response = await fetch("/api/betsapi/live", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url, maxPages }),
+        body: JSON.stringify({ url: debouncedUrl, maxPages: debouncedMaxPages }),
       });
 
       const data = (await response.json()) as LiveResponse | { error: string };
@@ -424,12 +459,37 @@ export default function AoVivoPage() {
       const payload = data as LiveResponse;
       if (payload.rows.length > 0) {
         setRows(payload.rows);
+        window.localStorage.setItem(
+          AOVIVO_SNAPSHOT_KEY,
+          JSON.stringify({
+            url: debouncedUrl,
+            maxPages: debouncedMaxPages,
+            rows: payload.rows,
+            updatedAt: payload.updatedAt,
+          })
+        );
       } else if (!manual) {
         setError("Atualização sem linhas válidas no momento. Mantendo último snapshot.");
       }
       setLastSuccessAt(payload.updatedAt);
+      setLastFetchMs(Math.round(performance.now() - startedAt));
+      if (typeof payload.collectedInMs === "number") {
+        setLastServerMs(payload.collectedInMs);
+      }
       if (payload.rows.length > 0) {
         setError("");
+      }
+
+      if (safeMode) {
+        const nextClientMs = Math.round(performance.now() - startedAt);
+        const nextServerMs = typeof payload.collectedInMs === "number" ? payload.collectedInMs : 0;
+        if (nextClientMs > 3500 || nextServerMs > 3000) {
+          setRefreshMs(5000);
+        } else if (nextClientMs > 2200 || nextServerMs > 1800) {
+          setRefreshMs(3000);
+        } else {
+          setRefreshMs(POLL_MS);
+        }
       }
     } catch {
       if (manual) {
@@ -437,6 +497,7 @@ export default function AoVivoPage() {
       } else {
         setError((prev) => prev || "Falha de rede ao consultar o BetsAPI.");
       }
+      if (safeMode) setRefreshMs(5000);
     } finally {
       if (manual) {
         setLoading(false);
@@ -451,10 +512,10 @@ export default function AoVivoPage() {
 
     const timer = setInterval(() => {
       void fetchLiveBoard({ manual: false });
-    }, POLL_MS);
+    }, refreshMs);
 
     return () => clearInterval(timer);
-  }, [autoRefresh, url, maxPages]);
+  }, [autoRefresh, debouncedUrl, debouncedMaxPages, refreshMs]);
 
   const strengths = useMemo(() => buildStrengthMap(matches), [matches]);
   const leaguePpg = useMemo(() => {
@@ -473,10 +534,24 @@ export default function AoVivoPage() {
     [queueRows, strengths, leaguePpg]
   );
 
+  const boardTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(boardWithProb.length / AOVIVO_PAGE_SIZE)),
+    [boardWithProb.length]
+  );
+
+  const boardVisible = useMemo(() => {
+    const start = (boardPage - 1) * AOVIVO_PAGE_SIZE;
+    return boardWithProb.slice(start, start + AOVIVO_PAGE_SIZE);
+  }, [boardWithProb, boardPage]);
+
+  useEffect(() => {
+    setBoardPage(1);
+  }, [debouncedUrl, debouncedMaxPages, rows.length]);
+
   const selectedDeepStats = useMemo(() => {
-    if (!selectedRow) return null;
+    if (!selectedRow || lightMode) return null;
     return buildDeepStats(selectedRow, matches, strengths, leaguePpg);
-  }, [selectedRow, matches, strengths, leaguePpg]);
+  }, [selectedRow, matches, strengths, leaguePpg, lightMode]);
 
   const isFresh = useMemo(() => {
     if (!lastSuccessAt) return false;
@@ -514,6 +589,7 @@ export default function AoVivoPage() {
             <Badge tone="warn">Minuto (ex: 08') = Ao Vivo</Badge>
             <Badge tone="good">View = Próximo jogo</Badge>
             <Badge>Horários ajustados para Brasília (BRT)</Badge>
+            <Badge tone={lightMode ? "warn" : "good"}>{lightMode ? "Modo leve ON" : "Modo completo ON"}</Badge>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 120px auto auto", gap: 10, marginBottom: 10 }}>
@@ -549,18 +625,36 @@ export default function AoVivoPage() {
             <Button variant={autoRefresh ? "primary" : "default"} onClick={() => setAutoRefresh((prev) => !prev)}>
               {autoRefresh ? "Auto 1s: ON" : "Auto 1s: OFF"}
             </Button>
+            <Button variant={lightMode ? "primary" : "default"} onClick={() => setLightMode((prev) => !prev)}>
+              {lightMode ? "Modo leve: ON" : "Modo leve: OFF"}
+            </Button>
+            <Button variant={safeMode ? "primary" : "default"} onClick={() => {
+              setSafeMode((prev) => !prev);
+              setRefreshMs(POLL_MS);
+            }}>
+              {safeMode ? "Safe mode: ON" : "Safe mode: OFF"}
+            </Button>
           </div>
 
           <div className="chips" style={{ marginBottom: 10 }}>
             <Badge>{`Linhas monitoradas: ${rows.length}`}</Badge>
             <Badge>{`Fila+AoVivo: ${queueRows.length}`}</Badge>
             <Badge>{`Base histórica: ${matches.length} jogos`}</Badge>
+            <Badge>{`Latência cliente: ${lastFetchMs}ms`}</Badge>
+            <Badge>{`Coleta servidor: ${lastServerMs}ms`}</Badge>
+            <Badge>{`Refresh: ${refreshMs}ms`}</Badge>
             {lastSuccessAt ? <Badge>{`Última atualização: ${new Date(lastSuccessAt).toLocaleTimeString("pt-BR")}`}</Badge> : null}
           </div>
 
           {error ? <Badge tone="bad">{error}</Badge> : null}
 
-          {!boardWithProb.length ? (
+          {loading && !rows.length ? (
+            <div style={{ marginTop: 12 }}>
+              <Skeleton />
+              <div style={{ marginTop: 8 }}><Skeleton width="80%" /></div>
+              <div style={{ marginTop: 8 }}><Skeleton width="65%" /></div>
+            </div>
+          ) : !boardWithProb.length ? (
             <div style={{ marginTop: 12 }}>
               <EmptyState title="Sem dados ao vivo" subtitle="Ative o Auto 1s ou clique em Atualizar agora para iniciar." />
             </div>
@@ -581,7 +675,7 @@ export default function AoVivoPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {boardWithProb.map(({ row, prob }, index) => (
+                  {boardVisible.map(({ row, prob }, index) => (
                     <tr key={`${row.eventTime}-${row.fixture}-${index}`}>
                       <td>{row.eventTime}</td>
                       <td>
@@ -589,7 +683,13 @@ export default function AoVivoPage() {
                           {statusLabel(row.status)}
                         </Badge>
                       </td>
-                      <td>{row.fixture}</td>
+                      <td>
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                          <PlayerAvatar nick={row.homeNick || row.homeTeam} size={24} radius={10} />
+                          <PlayerAvatar nick={row.awayNick || row.awayTeam} size={24} radius={10} />
+                          <span>{row.fixture}</span>
+                        </div>
+                      </td>
                       <td className="right">{row.score}</td>
                       <td className="right">{(prob.home * 100).toFixed(1)}%</td>
                       <td className="right">{(prob.draw * 100).toFixed(1)}%</td>
@@ -600,12 +700,19 @@ export default function AoVivoPage() {
                         </Badge>
                       </td>
                       <td>
-                        <Button onClick={() => setSelectedRow(row)}>Ver mais</Button>
+                        {lightMode ? <span className="mini">-</span> : <Button onClick={() => setSelectedRow(row)}>Ver mais</Button>}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </Table>
+              {boardWithProb.length > AOVIVO_PAGE_SIZE && (
+                <div className="chips" style={{ marginTop: 10 }}>
+                  <Button onClick={() => setBoardPage((prev) => Math.max(1, prev - 1))} disabled={boardPage <= 1}>← Anterior</Button>
+                  <Badge>Página {boardPage} de {boardTotalPages}</Badge>
+                  <Button onClick={() => setBoardPage((prev) => Math.min(boardTotalPages, prev + 1))} disabled={boardPage >= boardTotalPages}>Próxima →</Button>
+                </div>
+              )}
             </div>
           )}
         </CardBody>

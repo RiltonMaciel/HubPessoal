@@ -10,15 +10,9 @@ import type { MatchRecord } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
+import { PlayerAvatar } from "@/components/ui/PlayerAvatar";
 
 const lines = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
-
-function avatarColor(seed: string) {
-  const palette = ["#7C5CFF", "#4F8CFF", "#2EE59D", "#FFB020", "#FF4D6D"];
-  let hash = 0;
-  for (let i = 0; i < seed.length; i += 1) hash += seed.charCodeAt(i);
-  return palette[hash % palette.length];
-}
 
 export default function PlayerPage() {
   const params = useParams<{ nick: string }>();
@@ -92,7 +86,7 @@ export default function PlayerPage() {
               {avatar ? (
                 <Image src={avatar} alt={nick} width={88} height={88} style={{ borderRadius: 20, objectFit: "cover" }} />
               ) : (
-                <div className="avatar" style={{ width: 88, height: 88, borderRadius: 22, background: avatarColor(nick) }}>{nick.slice(0, 2).toUpperCase()}</div>
+                <PlayerAvatar nick={nick} size={88} radius={22} />
               )}
               <div className="nick">
                 <b style={{ fontSize: 24 }}>{nick}</b>
@@ -117,7 +111,7 @@ export default function PlayerPage() {
 
       <Card className="col-4"><CardHeader><div><h3>Comparação vs Liga</h3><small>Diferença por métrica</small></div></CardHeader><CardBody><div className="list"><div className="row"><span>PPG</span><b>{(player.ppgFinal - (dashboard.rankings.topBest[0]?.ppgFinal ?? 0)).toFixed(2)}</b></div><div className="row"><span>BTTS</span><b>{((player.bttsRate - dashboard.bttsRate) * 100).toFixed(1)} pp</b></div><div className="row"><span>IC95% BTTS</span><b>{(player.bttsInterval.low * 100).toFixed(1)}%–{(player.bttsInterval.high * 100).toFixed(1)}%</b></div><div className="row"><span>Linha favorita</span><b>{favoriteLine?.line ?? "-"}</b></div></div></CardBody></Card>
 
-      <Card className="col-6"><CardHeader><div><h3>Últimos 5 jogos</h3><small>Recorte recente</small></div></CardHeader><CardBody><div className="list">{recentGames.map((match) => <div key={match.id} className="row"><div className="left"><div className="avatar">{match.homeNick.slice(0,1)}{match.awayNick.slice(0,1)}</div><div className="nick"><b>{match.homeNick} {match.homeGoals} x {match.awayGoals} {match.awayNick}</b><small>{new Date(match.dateTime).toLocaleString("pt-BR")}</small></div></div></div>)}</div></CardBody></Card>
+      <Card className="col-6"><CardHeader><div><h3>Últimos 5 jogos</h3><small>Recorte recente</small></div></CardHeader><CardBody><div className="list">{recentGames.map((match) => <div key={match.id} className="row"><div className="left"><div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><PlayerAvatar nick={match.homeNick} size={24} radius={10} /><PlayerAvatar nick={match.awayNick} size={24} radius={10} /></div><div className="nick"><b>{match.homeNick} {match.homeGoals} x {match.awayGoals} {match.awayNick}</b><small>{new Date(match.dateTime).toLocaleString("pt-BR")}</small></div></div></div>)}</div></CardBody></Card>
 
       <Card className="col-6"><CardHeader><div><h3>Insights explicáveis</h3><small>Sem IA, regras determinísticas</small></div></CardHeader><CardBody><div className="list"><div className="row"><span>Linha favorita</span><b>{favoriteLine ? `${favoriteLine.line} (${(favoriteLine.diff * 100).toFixed(1)} pp vs liga)` : "-"}</b></div><div className="row"><span>Tendência recente</span><b>{trend ?? "Sem amostra"}</b></div><div className="row"><span>Força da evidência</span><b>{player.effectiveGames >= 10 ? "Robusta" : player.effectiveGames >= 5 ? "Moderada" : "Frágil"}</b></div></div></CardBody></Card>
     </section>

@@ -8,6 +8,7 @@ type LiveBody = {
 
 export async function POST(request: Request) {
   try {
+    const startedAt = Date.now();
     const body = (await request.json()) as LiveBody;
     const url = body.url?.trim();
     const rawMaxPages = Number(body.maxPages ?? 1);
@@ -29,6 +30,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       updatedAt: new Date().toISOString(),
+      collectedInMs: Date.now() - startedAt,
       pagesProcessed: result.processedPages,
       total: result.rows.length,
       rows: result.rows,

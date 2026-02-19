@@ -8,6 +8,7 @@ type ExportBody = {
 
 export async function POST(request: Request) {
   try {
+    const startedAt = Date.now();
     const body = (await request.json()) as ExportBody;
     const url = body.url?.trim();
     const rawMaxPages = Number(body.maxPages ?? 1);
@@ -32,6 +33,7 @@ export async function POST(request: Request) {
       ok: true,
       total: result.matches.length,
       pagesProcessed: result.processedPages,
+      collectedInMs: Date.now() - startedAt,
       fileName: `betsapi-esoccer-${stamp}.txt`,
       text: result.lines.join("\n"),
       lines: result.lines,

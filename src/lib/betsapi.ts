@@ -20,6 +20,12 @@ export type BetsApiBoardRow = {
 
 const DATE_RE = /^\d{2}\/\d{2}\s\d{1,2}:\d{2}$/;
 const SCORE_RE = /^\d+\s*[-:]\s*\d+$/;
+const PAGE_TIMEOUT_MS = 8000;
+const RETRY_ATTEMPTS = 3;
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function toBrasiliaTimeLabel(dateToken: string) {
   const match = dateToken.match(/^(\d{2})\/(\d{2})\s(\d{1,2}):(\d{2})$/);
@@ -204,22 +210,44 @@ function parseBoardRowsFromHtml(html: string): BetsApiBoardRow[] {
 }
 
 async function fetchBetsApiPage(url: string) {
-  const response = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-      accept: "text/html,application/xhtml+xml",
-      "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-      "cache-control": "no-cache",
-      pragma: "no-cache",
-    },
-    cache: "no-store",
-  });
+  let lastError: unknown = null;
 
-  if (!response.ok) {
-    throw new Error(`Falha ao buscar ${url}: HTTP ${response.status}`);
+  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PAGE_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+          accept: "text/html,application/xhtml+xml",
+          "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+          "cache-control": "no-cache",
+          pragma: "no-cache",
+        },
+        cache: "no-store",
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Falha ao buscar ${url}: HTTP ${response.status}`);
+      }
+
+      return response.text();
+    } catch (error) {
+      lastError = error;
+      if (attempt < RETRY_ATTEMPTS) {
+        await delay(250 * attempt);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
-  return response.text();
+  if (lastError instanceof Error) {
+    throw new Error(`Falha ao buscar ${url}: ${lastError.message}`);
+  }
+  throw new Error(`Falha ao buscar ${url}`);
 }
 
 export async function collectBetsApiMatches(leagueUrl: string, maxPages: number) {

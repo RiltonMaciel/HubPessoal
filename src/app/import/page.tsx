@@ -152,6 +152,7 @@ export default function ImportPage() {
   const [rawText, setRawText] = useState("");
   const [rawLeague, setRawLeague] = useState("eSoccer");
   const [rawYear, setRawYear] = useState(String(new Date().getFullYear()));
+  const [rawPreview, setRawPreview] = useState<ParsedImportData | null>(null);
 
   useEffect(() => {
     const saved = window.localStorage.getItem(RAW_IMPORT_DRAFT_KEY);
@@ -418,6 +419,27 @@ export default function ImportPage() {
     }
   };
 
+  const handleRawPreview = () => {
+    try {
+      const parsed = parseRawTextMatches(rawText, {
+        league: rawLeague,
+        referenceYear: Number(rawYear),
+      });
+
+      if (!parsed.matches.length) {
+        setRawPreview(null);
+        setMessage("Nenhuma linha válida para prévia.");
+        return;
+      }
+
+      setRawPreview(parsed);
+      setMessage(`Prévia pronta: ${parsed.matches.length} jogos válidos (${parsed.importSummary.linesRemoved} removidos).`);
+    } catch {
+      setRawPreview(null);
+      setMessage("Falha ao gerar prévia do texto bruto.");
+    }
+  };
+
   return (
     <section className="pageGrid">
       <Card className="col-12">
@@ -532,6 +554,7 @@ export default function ImportPage() {
             <Button variant="primary" disabled={loading} onClick={() => void handleRawImport()}>
               {loading ? "Importando..." : "Importar texto"}
             </Button>
+            <Button disabled={loading} onClick={handleRawPreview}>Pré-visualizar</Button>
           </div>
 
           <div className="chips" style={{ marginBottom: 10 }}>
@@ -548,6 +571,24 @@ export default function ImportPage() {
             aria-label="Texto bruto para importação"
             style={{ width: "100%", resize: "vertical" }}
           />
+
+          {rawPreview && (
+            <div style={{ marginTop: 12 }}>
+              <div className="chips" style={{ marginBottom: 10 }}>
+                <Badge>Prévia: {rawPreview.matches.length} jogos</Badge>
+                <Badge>Linhas lidas: {rawPreview.importSummary.linesRead}</Badge>
+                <Badge tone="warn">Descartadas: {rawPreview.importSummary.linesRemoved}</Badge>
+              </div>
+              <div className="list">
+                {rawPreview.matches.slice(0, 5).map((item) => (
+                  <div className="row" key={item.id}>
+                    <div className="left"><small>{new Date(item.dateTime).toLocaleString("pt-BR")}</small></div>
+                    <div className="metric"><small>{item.homeNick} {item.homeGoals}-{item.awayGoals} {item.awayNick}</small></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </CardBody>
       </Card>
     </section>
