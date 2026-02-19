@@ -3,7 +3,10 @@
 import * as XLSX from "xlsx";
 import { useEffect, useMemo, useState } from "react";
 import { db } from "@/lib/db";
+import { applyAliasesToMatches, getAliasMap } from "@/lib/aliases";
+import { decideRecommendation } from "@/lib/decision";
 import { parseRawTextMatches } from "@/lib/excel";
+import { logPrediction, resolvePendingPredictions } from "@/lib/prediction-ledger";
 import type { MatchRecord } from "@/lib/types";
 import { formatDateTimePtBr, toDateTimestamp, toIsoDateTime } from "@/lib/datetime";
 import { Badge } from "@/components/ui/Badge";
@@ -16,13 +19,41 @@ import { PlayerAvatar } from "@/components/ui/PlayerAvatar";
 import { Select } from "@/components/ui/Select";
 import { Table } from "@/components/ui/Table";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { useAppStore } from "@/store/appStore";
+import { buildDerivedSignalIndex, computeDerivedSignals, summarizeTeamAffinity } from "@/lib/derived-signals";
 
 const lines = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
 const lastNOptions = ["5", "10", "20", "all"] as const;
 const recencyFactor = 0.9;
 const LOCAL_EXTRA_KEY = "hubpessoal-h2h-extra-matches-v1";
+const H2H_LAST_SEARCH_KEY = "hubpessoal-h2h-last-search-v1";
+const H2H_RECENT_SEARCHES_KEY = "hubpessoal-h2h-recent-searches-v1";
 const H2H_PAGE_SIZE = 30;
 type H2hTab = "analise" | "excel" | "jogador";
+
+type H2hSearchSnapshot = {
+  playerA: string;
+  playerB: string;
+  teamA: string;
+  teamB: string;
+  line: number;
+  lastN: (typeof lastNOptions)[number];
+  activeTab: H2hTab;
+  savedAt: string;
+};
+
+function normalizeSearchPart(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function buildSearchId(snapshot: Pick<H2hSearchSnapshot, "playerA" | "playerB" | "teamA" | "teamB" | "line" | "lastN">) {
+  const a = normalizeSearchPart(snapshot.playerA);
+  const b = normalizeSearchPart(snapshot.playerB);
+  const pair = a < b ? `${a}__vs__${b}` : `${b}__vs__${a}`;
+  const ta = normalizeSearchPart(snapshot.teamA || "");
+  const tb = normalizeSearchPart(snapshot.teamB || "");
+  return `${pair}__tA:${ta}__tB:${tb}__ou:${snapshot.line}__n:${snapshot.lastN}`;
+}
 
 type PlayerStats = {
   games: number;
@@ -427,8 +458,11 @@ function buildH2hScore(args: {
 }
 
 export default function HeadToHeadPage() {
+  const dataRevision = useAppStore((state) => state.dataRevision);
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [extraMatches, setExtraMatches] = useState<MatchRecord[]>([]);
+  const [datasetVersion, setDatasetVersion] = useState<string | null>(null);
+  const [aliasMap, setAliasMap] = useState<Map<string, string>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
   const [playerA, setPlayerA] = useState("");
   const [playerB, setPlayerB] = useState("");
@@ -445,39 +479,215 @@ export default function HeadToHeadPage() {
   const [uploadMessage, setUploadMessage] = useState("");
   const debouncedTeamA = useDebouncedValue(teamA, 250);
   const debouncedTeamB = useDebouncedValue(teamB, 250);
+  const [searchStorageReady, setSearchStorageReady] = useState(false);
+  const [recentSearches, setRecentSearches] = useState<Array<H2hSearchSnapshot & { id: string }>>([]);
 
   useEffect(() => {
-    void (async () => {
-      const rows = await db.matches.toArray();
-      setMatches(rows);
-
-      if (typeof window !== "undefined") {
-        const raw = window.localStorage.getItem(LOCAL_EXTRA_KEY);
-        if (raw) {
-          try {
-            const parsed = JSON.parse(raw) as MatchRecord[];
-            setExtraMatches(Array.isArray(parsed) ? parsed : []);
-          } catch {
-            setExtraMatches([]);
-          }
+    // Carrega último confronto e histórico de pesquisas.
+    try {
+      const rawLast = window.localStorage.getItem(H2H_LAST_SEARCH_KEY);
+      if (rawLast) {
+        const parsed = JSON.parse(rawLast) as Partial<H2hSearchSnapshot>;
+        if (typeof parsed.playerA === "string") setPlayerA(parsed.playerA);
+        if (typeof parsed.playerB === "string") setPlayerB(parsed.playerB);
+        if (typeof parsed.teamA === "string") setTeamA(parsed.teamA);
+        if (typeof parsed.teamB === "string") setTeamB(parsed.teamB);
+        if (typeof parsed.line === "number" && Number.isFinite(parsed.line)) setLine(parsed.line);
+        if (typeof parsed.lastN === "string" && (lastNOptions as readonly string[]).includes(parsed.lastN)) {
+          setLastN(parsed.lastN as (typeof lastNOptions)[number]);
+        }
+        if (typeof parsed.activeTab === "string") {
+          const safeTab = parsed.activeTab as H2hTab;
+          if (safeTab === "analise" || safeTab === "excel" || safeTab === "jogador") setActiveTab(safeTab);
         }
       }
 
-      setIsLoading(false);
-    })();
+      const rawRecent = window.localStorage.getItem(H2H_RECENT_SEARCHES_KEY);
+      if (rawRecent) {
+        const parsed = JSON.parse(rawRecent) as Array<Partial<H2hSearchSnapshot> & { id?: string }>;
+        if (Array.isArray(parsed)) {
+          const safe = parsed
+            .filter((item) => item && typeof item.playerA === "string" && typeof item.playerB === "string")
+            .map((item) => {
+              const normalized: H2hSearchSnapshot = {
+                playerA: String(item.playerA ?? ""),
+                playerB: String(item.playerB ?? ""),
+                teamA: String(item.teamA ?? ""),
+                teamB: String(item.teamB ?? ""),
+                line: typeof item.line === "number" && Number.isFinite(item.line) ? item.line : 3.5,
+                lastN: (lastNOptions as readonly string[]).includes(String(item.lastN))
+                  ? (String(item.lastN) as (typeof lastNOptions)[number])
+                  : "10",
+                activeTab: item.activeTab === "excel" || item.activeTab === "jogador" ? item.activeTab : "analise",
+                savedAt: typeof item.savedAt === "string" ? item.savedAt : new Date().toISOString(),
+              };
+              return { ...normalized, id: item.id || buildSearchId(normalized) };
+            })
+            .slice(0, 10);
+          setRecentSearches(safe);
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      setSearchStorageReady(true);
+    }
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      setIsLoading(true);
+      try {
+        const [rows, rawDataset, aliases] = await Promise.all([
+          db.matches.toArray(),
+          db.rawDatasets.get("latest"),
+          getAliasMap(),
+        ]);
+
+        if (cancelled) return;
+        setMatches(rows);
+        setDatasetVersion(rawDataset?.datasetVersion ?? null);
+        setAliasMap(aliases);
+        await resolvePendingPredictions();
+
+        if (cancelled) return;
+
+        if (typeof window !== "undefined") {
+          const raw = window.localStorage.getItem(LOCAL_EXTRA_KEY);
+          if (raw) {
+            try {
+              const parsed = JSON.parse(raw) as MatchRecord[];
+              setExtraMatches(Array.isArray(parsed) ? parsed : []);
+            } catch {
+              setExtraMatches([]);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("[h2h] falha ao carregar base local", error);
+        if (cancelled) return;
+        setMatches([]);
+        setExtraMatches([]);
+        setDatasetVersion(null);
+        setAliasMap(new Map());
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dataRevision]);
+
+  useEffect(() => {
+    if (!searchStorageReady) return;
+    const snapshot: H2hSearchSnapshot = {
+      playerA,
+      playerB,
+      teamA,
+      teamB,
+      line,
+      lastN,
+      activeTab,
+      savedAt: new Date().toISOString(),
+    };
+    try {
+      window.localStorage.setItem(H2H_LAST_SEARCH_KEY, JSON.stringify(snapshot));
+    } catch {
+      // ignore
+    }
+  }, [playerA, playerB, teamA, teamB, line, lastN, activeTab, searchStorageReady]);
 
   const allMatches = useMemo(() => {
     const dedupe = new Set<string>();
     const merged: MatchRecord[] = [];
-    [...matches, ...extraMatches].forEach((item) => {
+    [...applyAliasesToMatches(matches, aliasMap), ...applyAliasesToMatches(extraMatches, aliasMap)].forEach((item) => {
       const key = buildMatchFingerprint(item);
       if (dedupe.has(key)) return;
       dedupe.add(key);
       merged.push(item);
     });
     return merged;
-  }, [matches, extraMatches]);
+  }, [matches, extraMatches, aliasMap]);
+
+  const derivedIndex = useMemo(() => buildDerivedSignalIndex(allMatches), [allMatches]);
+
+  const contextEnabled = useMemo(() => {
+    const a = playerA.trim();
+    const b = playerB.trim();
+    return Boolean(a && b && a.toLowerCase() !== b.toLowerCase());
+  }, [playerA, playerB]);
+
+  useEffect(() => {
+    // Salva automaticamente o confronto no histórico quando houver dois jogadores.
+    if (!searchStorageReady) return;
+    if (!contextEnabled) return;
+
+    const snapshot: H2hSearchSnapshot = {
+      playerA,
+      playerB,
+      teamA,
+      teamB,
+      line,
+      lastN,
+      activeTab: "analise",
+      savedAt: new Date().toISOString(),
+    };
+    const id = buildSearchId(snapshot);
+
+    setRecentSearches((prev) => {
+      const next = [{ ...snapshot, id }, ...prev.filter((item) => item.id !== id)].slice(0, 10);
+      try {
+        window.localStorage.setItem(H2H_RECENT_SEARCHES_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, [contextEnabled, playerA, playerB, teamA, teamB, line, lastN, searchStorageReady]);
+
+  const contextSignals = useMemo(() => {
+    if (!contextEnabled) return null;
+    const nowIso = new Date().toISOString();
+    return computeDerivedSignals({
+      match: {
+        dateTime: nowIso,
+        league: "all",
+        homeNick: playerA,
+        awayNick: playerB,
+        homeTeam: teamA || "(qualquer)",
+        awayTeam: teamB || "(qualquer)",
+      },
+      index: derivedIndex,
+      ouLine: line,
+      sessionGapMinutes: 45,
+      validateLeague: true,
+    });
+  }, [contextEnabled, derivedIndex, line, playerA, playerB, teamA, teamB]);
+
+  const playerAHistory = useMemo(() => {
+    if (!contextEnabled) return [];
+    const a = playerA.toLowerCase();
+    return allMatches
+      .filter((m) => m.homeNick.toLowerCase() === a || m.awayNick.toLowerCase() === a)
+      .filter((m) => !teamA || m.homeTeam === teamA || m.awayTeam === teamA)
+      .sort((x, y) => +new Date(x.dateTime) - +new Date(y.dateTime));
+  }, [contextEnabled, allMatches, playerA, teamA]);
+
+  const playerBHistory = useMemo(() => {
+    if (!contextEnabled) return [];
+    const b = playerB.toLowerCase();
+    return allMatches
+      .filter((m) => m.homeNick.toLowerCase() === b || m.awayNick.toLowerCase() === b)
+      .filter((m) => !teamB || m.homeTeam === teamB || m.awayTeam === teamB)
+      .sort((x, y) => +new Date(x.dateTime) - +new Date(y.dateTime));
+  }, [contextEnabled, allMatches, playerB, teamB]);
+
+  const topTeamsA = useMemo(() => summarizeTeamAffinity({ nick: playerA, history: playerAHistory, ouLine: line, minGamesPerTeam: 4, topN: 3 }), [playerA, playerAHistory, line]);
+  const topTeamsB = useMemo(() => summarizeTeamAffinity({ nick: playerB, history: playerBHistory, ouLine: line, minGamesPerTeam: 4, topN: 3 }), [playerB, playerBHistory, line]);
 
   const nickIndex = useMemo(() => buildNickIndex(allMatches), [allMatches]);
 
@@ -923,6 +1133,51 @@ export default function HeadToHeadPage() {
     return "Fora: amostra fraca.";
   }, [analysis.valid, h2hScore, playerA, playerB, sampleLabel]);
 
+  const h2hDecision = useMemo(() => {
+    const confidenceSample = h2hWindow.length + analysis.commonRows.length;
+    const reliability = confidenceSample >= 12 ? 90 : confidenceSample >= 7 ? 70 : 45;
+    return decideRecommendation({
+      mode: "conservador",
+      signal: h2hScore.edgeFor === "equilibrado" ? "neutro" : "over",
+      score: h2hScore.score,
+      effectiveGames: confidenceSample,
+      minGamesConfidence: 8,
+      intervalWidth: h2hTotals.overInterval.high - h2hTotals.overInterval.low,
+      driftLevel: "estavel",
+      edgeVsNeutral: Math.abs((h2hTotals.overRate ?? 0) - 0.5),
+      adaptiveEdgeThreshold: 0.06,
+      probabilityRaw: h2hTotals.overRate,
+      probabilityCalibrated: h2hTotals.weightedOverRate,
+      antiFalseSignalPassed: h2hScore.level !== "evitar",
+      reliabilityScore: reliability,
+      isCollectReliable: reliability >= 70,
+    });
+  }, [h2hWindow.length, analysis.commonRows.length, h2hScore, h2hTotals]);
+
+  useEffect(() => {
+    if (!datasetVersion || !h2hWindow.length || !analysis.valid) return;
+    const target = h2hWindow[0];
+    if (!target) return;
+
+    void logPrediction({
+      datasetVersion,
+      modelVersion: "model:v1",
+      presetId: `h2h:${playerA}:${playerB}`,
+      routeContext: "h2h",
+      match: target,
+      market: `ou${line}`,
+      pRaw: h2hTotals.overRate,
+      pCalibrated: h2hTotals.weightedOverRate,
+      decision: h2hDecision.recommendation,
+      confidence: h2hDecision.confidence,
+      reasons: [...h2hScore.reasons, ...h2hDecision.reasons],
+      contraReasons: h2hDecision.contrarianReasons,
+      inputSnapshot: { playerA, playerB, teamA, teamB, line, lastN },
+      reliabilityScore: 80,
+      isCollectReliable: true,
+    });
+  }, [datasetVersion, h2hWindow, analysis.valid, playerA, playerB, line, lastN, teamA, teamB, h2hTotals, h2hDecision, h2hScore.reasons]);
+
   const exportH2hCsv = () => {
     if (!analysis.valid) return;
 
@@ -1047,6 +1302,41 @@ export default function HeadToHeadPage() {
           <Chip active={activeTab === "jogador"} onClick={() => setActiveTab("jogador")}>Aba: Base por Jogador <InfoHint text="Use esta aba para carregar jogos avulsos de UM jogador sem alterar a base principal.\nExemplo: você tem jogos recentes do BOOM e quer testar só no H2H antes de importar no dataset oficial." /></Chip>
           <Badge>Base extra: {extraMatches.length} jogos <InfoHint text="Quantidade de jogos extras usados apenas na tela H2H.\nExemplo: se mostrar 25, esses 25 entram no confronto direto e não mudam dashboard/import principal." /></Badge>
         </div>
+
+        {recentSearches.length ? (
+          <div className="chips" style={{ marginTop: 10, marginBottom: 6, alignItems: "center" }}>
+            <strong style={{ fontSize: 12, opacity: 0.9 }}>Histórico:</strong>
+            {recentSearches.slice(0, 6).map((item) => (
+              <Chip
+                key={item.id}
+                active={normalizeSearchPart(playerA) === normalizeSearchPart(item.playerA) && normalizeSearchPart(playerB) === normalizeSearchPart(item.playerB)}
+                onClick={() => {
+                  setPlayerA(item.playerA);
+                  setPlayerB(item.playerB);
+                  setTeamA(item.teamA);
+                  setTeamB(item.teamB);
+                  setLine(item.line);
+                  setLastN(item.lastN);
+                  setActiveTab("analise");
+                }}
+              >
+                {item.playerA} vs {item.playerB} • OU {item.line} • {item.lastN === "all" ? "Tudo" : `N${item.lastN}`}
+              </Chip>
+            ))}
+            <Button
+              onClick={() => {
+                setRecentSearches([]);
+                try {
+                  window.localStorage.removeItem(H2H_RECENT_SEARCHES_KEY);
+                } catch {
+                  // ignore
+                }
+              }}
+            >
+              Limpar histórico
+            </Button>
+          </div>
+        ) : null}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10, width: "100%" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <Select value={playerA} onChange={(e) => setPlayerA(e.target.value)} aria-label="Jogador A">
@@ -1185,6 +1475,65 @@ export default function HeadToHeadPage() {
               <p className="mini" style={{ margin: 0 }}>{recommendation}</p>
             </CardBody>
           </Card>
+
+          {contextSignals ? (
+            <Card className="col-12">
+              <CardHeader>
+                <div>
+                  <h3 style={{ margin: 0 }}>Sinais Contextuais <InfoHint text="Sinais derivados calculados com anti-leak (somente histórico ANTERIOR ao 'agora').\n\nEles modulam confiança e explicam contexto — não substituem o score H2H principal." /></h3>
+                  <small>Revenge • Tilt • Sessão • Estilo • Afinidade por time</small>
+                </div>
+              </CardHeader>
+              <CardBody>
+                <div className="chips" style={{ marginBottom: 10 }}>
+                  <Badge>
+                    Revenge {playerA}→{playerB}: {contextSignals.revenge.homeRevengeIndex}
+                    <InfoHint text="Derrotas seguidas do jogador contra o mesmo oponente (0..5)." />
+                  </Badge>
+                  <Badge>
+                    Revenge {playerB}→{playerA}: {contextSignals.revenge.awayRevengeIndex}
+                    <InfoHint text="Mesma métrica do lado oposto." />
+                  </Badge>
+                  <Badge>
+                    H2H jogos: {contextSignals.revenge.h2hGames}
+                    <InfoHint text="Quantidade total de confrontos diretos históricos entre os dois nicks (antes de agora)." />
+                  </Badge>
+                  {contextSignals.revenge.validation ? (
+                    <Badge tone={contextSignals.revenge.validation.status === "ok" ? "good" : "warn"}>
+                      Validação revenge: {contextSignals.revenge.validation.status} (n={contextSignals.revenge.validation.sampleSize})
+                    </Badge>
+                  ) : null}
+                  <Badge tone={contextSignals.tilt.home.tiltScore > 0 ? "good" : contextSignals.tilt.home.tiltScore < 0 ? "bad" : "warn"}>
+                    Tilt {playerA}: {contextSignals.tilt.home.tiltScore}
+                    <InfoHint text={`Últimos 5: winrate ${(contextSignals.tilt.home.winRateLast5 * 100).toFixed(0)}% • saldo ${contextSignals.tilt.home.goalDiffLast5} • sofridos(3) ${contextSignals.tilt.home.concededLast3}`} />
+                  </Badge>
+                  <Badge tone={contextSignals.tilt.away.tiltScore > 0 ? "good" : contextSignals.tilt.away.tiltScore < 0 ? "bad" : "warn"}>
+                    Tilt {playerB}: {contextSignals.tilt.away.tiltScore}
+                    <InfoHint text={`Últimos 5: winrate ${(contextSignals.tilt.away.winRateLast5 * 100).toFixed(0)}% • saldo ${contextSignals.tilt.away.goalDiffLast5} • sofridos(3) ${contextSignals.tilt.away.concededLast3}`} />
+                  </Badge>
+                  <Badge>
+                    Estilo: pace {contextSignals.style.pace.toFixed(2)} • frag {contextSignals.style.fragility.toFixed(2)} • vol {contextSignals.style.volatility.toFixed(2)}
+                  </Badge>
+                  <Badge tone={contextSignals.session.home.lowSample ? "warn" : "good"}>
+                    Sessão {playerA}: n={contextSignals.session.home.sessionGamesCount} • {(contextSignals.session.home.sessionWinRate * 100).toFixed(0)}% • {contextSignals.session.home.sessionTrend}
+                  </Badge>
+                  <Badge tone={contextSignals.session.away.lowSample ? "warn" : "good"}>
+                    Sessão {playerB}: n={contextSignals.session.away.sessionGamesCount} • {(contextSignals.session.away.sessionWinRate * 100).toFixed(0)}% • {contextSignals.session.away.sessionTrend}
+                  </Badge>
+                  {contextSignals.drift ? (
+                    <Badge tone={contextSignals.drift.level === "estavel" ? "good" : contextSignals.drift.level === "atencao" ? "warn" : "bad"}>
+                      Drift(seg): {contextSignals.drift.level}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                <div className="list">
+                  <div className="row"><span>Top times {playerA}</span><b>{topTeamsA.length ? topTeamsA.map((t) => `${t.team} (${(t.deltaWin * 100).toFixed(1)}pp, n=${t.games})`).join(" • ") : "Sem times suficientes"}</b></div>
+                  <div className="row"><span>Top times {playerB}</span><b>{topTeamsB.length ? topTeamsB.map((t) => `${t.team} (${(t.deltaWin * 100).toFixed(1)}pp, n=${t.games})`).join(" • ") : "Sem times suficientes"}</b></div>
+                </div>
+              </CardBody>
+            </Card>
+          ) : null}
 
           <Card className="col-8">
             <CardHeader>

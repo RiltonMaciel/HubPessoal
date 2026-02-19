@@ -4,6 +4,9 @@ import { collectBetsApiMatches } from "@/lib/betsapi";
 type ExportBody = {
   url?: string;
   maxPages?: number;
+  maxMatches?: number;
+  cookie?: string;
+  userAgent?: string;
 };
 
 export async function POST(request: Request) {
@@ -12,6 +15,9 @@ export async function POST(request: Request) {
     const body = (await request.json()) as ExportBody;
     const url = body.url?.trim();
     const rawMaxPages = Number(body.maxPages ?? 1);
+    const rawMaxMatches = body.maxMatches == null ? null : Number(body.maxMatches);
+    const cookie = body.cookie?.trim();
+    const userAgent = body.userAgent?.trim();
 
     if (!url) {
       return NextResponse.json({ error: "Informe a URL da liga no BetsAPI." }, { status: 400 });
@@ -25,7 +31,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "maxPages deve estar entre 1 e 5000." }, { status: 400 });
     }
 
-    const result = await collectBetsApiMatches(url, rawMaxPages);
+    if (rawMaxMatches != null && (Number.isNaN(rawMaxMatches) || rawMaxMatches < 1 || rawMaxMatches > 5000)) {
+      return NextResponse.json({ error: "maxMatches deve estar entre 1 e 5000." }, { status: 400 });
+    }
+
+    const result = await collectBetsApiMatches(
+      url,
+      rawMaxPages,
+      cookie || userAgent || rawMaxMatches != null
+        ? { cookie: cookie ?? undefined, userAgent: userAgent ?? undefined, maxMatches: rawMaxMatches ?? undefined }
+        : undefined
+    );
     const now = new Date();
     const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
 

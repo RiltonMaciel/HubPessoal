@@ -22,6 +22,25 @@ const DATE_RE = /^\d{2}\/\d{2}\s\d{1,2}:\d{2}$/;
 const SCORE_RE = /^\d+\s*[-:]\s*\d+$/;
 const PAGE_TIMEOUT_MS = 8000;
 const RETRY_ATTEMPTS = 3;
+const MANUAL_BETSAPI_COOKIE = process.env.BETSAPI_COOKIE?.trim() ?? "";
+
+type BetsApiFetchOptions = {
+  cookie?: string;
+  userAgent?: string;
+  maxMatches?: number;
+};
+
+function buildBrowserHeaders(extra?: Record<string, string>) {
+  return {
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "cache-control": "no-cache",
+    pragma: "no-cache",
+    "upgrade-insecure-requests": "1",
+    ...extra,
+  };
+}
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -115,6 +134,12 @@ function buildLeagueUrlCandidates(leagueUrl: string) {
   const candidates = [base];
   if (base.includes("/ls/")) candidates.push(base.replace("/ls/", "/le/"));
   if (base.includes("/le/")) candidates.push(base.replace("/le/", "/ls/"));
+  if (base.includes("/l/")) {
+    candidates.push(base.replace("/l/", "/le/"));
+    candidates.push(base.replace("/l/", "/ls/"));
+  }
+  if (base.includes("/le/")) candidates.push(base.replace("/le/", "/l/"));
+  if (base.includes("/ls/")) candidates.push(base.replace("/ls/", "/l/"));
   return [...new Set(candidates)];
 }
 
@@ -209,7 +234,7 @@ function parseBoardRowsFromHtml(html: string): BetsApiBoardRow[] {
   return parsed;
 }
 
-async function fetchBetsApiPage(url: string) {
+async function fetchBetsApiPage(url: string, options?: BetsApiFetchOptions) {
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt += 1) {
@@ -217,15 +242,24 @@ async function fetchBetsApiPage(url: string) {
     const timeout = setTimeout(() => controller.abort(), PAGE_TIMEOUT_MS);
 
     try {
+      const requestOrigin = (() => {
+        try {
+          return new URL(url).origin;
+        } catch {
+          return "https://betsapi.com";
+        }
+      })();
       const response = await fetch(url, {
         headers: {
-          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+          "user-agent": options?.userAgent?.trim() || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
           accept: "text/html,application/xhtml+xml",
           "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
           "cache-control": "no-cache",
           pragma: "no-cache",
+          ...(options?.cookie?.trim() || MANUAL_BETSAPI_COOKIE ? { cookie: (options?.cookie?.trim() || MANUAL_BETSAPI_COOKIE) } : {}),
         },
         cache: "no-store",
+        redirect: "follow",
         signal: controller.signal,
       });
 
@@ -236,6 +270,11 @@ async function fetchBetsApiPage(url: string) {
       return response.text();
     } catch (error) {
       lastError = error;
+
+      if (error instanceof Error && /\bHTTP\s+(403|429)\b/i.test(error.message)) {
+        break;
+      }
+
       if (attempt < RETRY_ATTEMPTS) {
         await delay(250 * attempt);
       }
@@ -250,8 +289,11 @@ async function fetchBetsApiPage(url: string) {
   throw new Error(`Falha ao buscar ${url}`);
 }
 
-export async function collectBetsApiMatches(leagueUrl: string, maxPages: number) {
+export async function collectBetsApiMatches(leagueUrl: string, maxPages: number, options?: BetsApiFetchOptions) {
   const safeMaxPages = Math.max(1, Math.min(5000, Math.floor(maxPages)));
+  const safeMaxMatches = options?.maxMatches != null
+    ? Math.max(1, Math.min(5000, Math.floor(options.maxMatches)))
+    : null;
   const baseCandidates = buildLeagueUrlCandidates(leagueUrl);
   const seen = new Set<string>();
   const allMatches: BetsApiMatch[] = [];
@@ -260,12 +302,12 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number)
 
   for (const candidate of baseCandidates) {
     try {
-      const rootHtml = await fetchBetsApiPage(candidate);
+      const rootHtml = await fetchBetsApiPage(candidate, options);
       const fixturesBaseUrl = findFixturesUrlFromHtml(rootHtml, candidate);
 
       for (let page = 1; page <= safeMaxPages; page += 1) {
         const pageUrl = buildPageUrl(fixturesBaseUrl, page);
-        const html = await fetchBetsApiPage(pageUrl);
+        const html = await fetchBetsApiPage(pageUrl, options);
         const pageMatches = parseRowsFromHtml(html);
         processedPages += 1;
 
@@ -276,6 +318,14 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number)
           if (seen.has(key)) continue;
           seen.add(key);
           allMatches.push(item);
+
+          if (safeMaxMatches != null && allMatches.length >= safeMaxMatches) {
+            break;
+          }
+        }
+
+        if (safeMaxMatches != null && allMatches.length >= safeMaxMatches) {
+          break;
         }
       }
 
@@ -291,7 +341,7 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number)
     }
   }
 
-  const boardFallback = await collectBetsApiBoard(leagueUrl, safeMaxPages);
+  const boardFallback = await collectBetsApiBoard(leagueUrl, safeMaxPages, options);
   const finishedRows = boardFallback.rows.filter((item) => item.status === "finished" && SCORE_RE.test(item.score));
   const fallbackMatches = finishedRows.map((item) => ({
     dateTime: item.eventTime,
@@ -318,7 +368,7 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number)
   };
 }
 
-export async function collectBetsApiBoard(leagueUrl: string, maxPages: number) {
+export async function collectBetsApiBoard(leagueUrl: string, maxPages: number, options?: BetsApiFetchOptions) {
   const safeMaxPages = Math.max(1, Math.min(5000, Math.floor(maxPages)));
   const candidates = buildLeagueUrlCandidates(leagueUrl);
   const errors: string[] = [];
@@ -331,7 +381,7 @@ export async function collectBetsApiBoard(leagueUrl: string, maxPages: number) {
     try {
       for (let page = 1; page <= safeMaxPages; page += 1) {
         const pageUrl = buildPageUrl(candidate, page);
-        const html = await fetchBetsApiPage(pageUrl);
+        const html = await fetchBetsApiPage(pageUrl, options);
         const pageRows = parseBoardRowsFromHtml(html);
         processedPages += 1;
 

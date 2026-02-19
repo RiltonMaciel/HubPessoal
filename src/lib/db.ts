@@ -10,14 +10,18 @@ import type {
   NoteRecord,
   Odds1X2Record,
   OddsOuRecord,
+  AliasRecord,
   PlayerMapRecord,
+  PredictionLedgerRecord,
   SecureItemRecord,
   SecureMetaRecord,
   UpcomingRecord,
+  WatchlistRecord,
 } from "@/lib/types";
 
 export type RawDataset = {
   id: string;
+  datasetVersion?: string | null;
   matches: MatchRecord[];
   upcoming: UpcomingRecord[];
   odds1x2: Odds1X2Record[];
@@ -47,6 +51,9 @@ class HubDb extends Dexie {
   avatars!: Table<AvatarRecord, string>;
   rawDatasets!: Table<RawDataset, string>;
   computedCache!: Table<ComputedCache, string>;
+  predictionLedger!: Table<PredictionLedgerRecord, string>;
+  aliases!: Table<AliasRecord, string>;
+  watchlist!: Table<WatchlistRecord, string>;
   secureMeta!: Table<SecureMetaRecord, string>;
   secureItems!: Table<SecureItemRecord, string>;
   presets!: Table<FilterPresetRecord, string>;
@@ -81,6 +88,26 @@ class HubDb extends Dexie {
       avatars: "nick",
       rawDatasets: "id, importedAt",
       computedCache: "key, importedAt",
+      secureMeta: "key",
+      secureItems: "id, area, updatedAt",
+      presets: "id, name, updatedAt",
+    });
+
+    this.version(3).stores({
+      matches: "id, league, dateTime, homeNick, awayNick",
+      upcoming: "id, league, dateTime, homeNick, awayNick",
+      odds1x2: "id, league, dateTime",
+      oddsOu: "id, league, line, dateTime",
+      config: "++id",
+      players: "nick",
+      notes: "id, type, pinned, updatedAt",
+      events: "id, date, holiday",
+      avatars: "nick",
+      rawDatasets: "id, importedAt",
+      computedCache: "key, importedAt",
+      predictionLedger: "id, createdAt, resolvedAt, routeContext, market, league, matchKey",
+      aliases: "id, nickOriginal, nickCanonico, updatedAt",
+      watchlist: "id, kind, value, createdAt",
       secureMeta: "key",
       secureItems: "id, area, updatedAt",
       presets: "id, name, updatedAt",
