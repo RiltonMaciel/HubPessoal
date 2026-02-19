@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
-import { collectBetsApiMatches } from "@/lib/betsapi";
+import { collectBetsApiBoard } from "@/lib/betsapi";
 
-type ExportBody = {
+type LiveBody = {
   url?: string;
   maxPages?: number;
 };
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as ExportBody;
+    const body = (await request.json()) as LiveBody;
     const url = body.url?.trim();
     const rawMaxPages = Number(body.maxPages ?? 1);
 
@@ -24,20 +24,24 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "maxPages deve estar entre 1 e 5000." }, { status: 400 });
     }
 
-    const result = await collectBetsApiMatches(url, rawMaxPages);
-    const now = new Date();
-    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
+    const result = await collectBetsApiBoard(url, rawMaxPages);
 
     return NextResponse.json({
       ok: true,
-      total: result.matches.length,
+      updatedAt: new Date().toISOString(),
       pagesProcessed: result.processedPages,
-      fileName: `betsapi-esoccer-${stamp}.txt`,
-      text: result.lines.join("\n"),
+      total: result.rows.length,
+      rows: result.rows,
       lines: result.lines,
+      statusCounts: {
+        live: result.rows.filter((item) => item.status === "live").length,
+        upcoming: result.rows.filter((item) => item.status === "upcoming").length,
+        finished: result.rows.filter((item) => item.status === "finished").length,
+      },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Erro inesperado ao processar BetsAPI.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const message = error instanceof Error ? error.message : "Erro inesperado ao processar o AoVivo.";
+    const status = /403|forbidden|anti-bot|bloqueio/i.test(message) ? 502 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

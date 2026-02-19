@@ -86,6 +86,21 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function safeRate(hit: number, total: number) {
+  return total > 0 ? hit / total : 0;
+}
+
+function variance(values: number[]) {
+  if (values.length <= 1) return 0;
+  const mean = values.reduce((acc, value) => acc + value, 0) / values.length;
+  const sq = values.reduce((acc, value) => acc + (value - mean) ** 2, 0);
+  return sq / (values.length - 1);
+}
+
+function stdDev(values: number[]) {
+  return Math.sqrt(variance(values));
+}
+
 export function buildDashboardData({
   matches,
   league,
@@ -205,9 +220,17 @@ export function buildDashboardData({
         allPlayers.length
       : 0;
 
+  const totals = filtered.map((item) => item.homeGoals + item.awayGoals);
+  const goalsVariance = variance(totals);
+  const adaptiveShrinkK = clamp(
+    shrinkK + (goalsVariance > 8 ? 3 : goalsVariance > 5 ? 1 : 0) + (totalGames < 30 ? 2 : 0),
+    4,
+    16
+  );
+
   const playerSummaries: PlayerSummary[] = allPlayers.map((player) => {
     const ppg = player.points / Math.max(player.games, 1);
-    const ppgFinal = (ppg * player.games + leaguePpg * shrinkK) / (player.games + shrinkK);
+    const ppgFinal = (ppg * player.games + leaguePpg * adaptiveShrinkK) / (player.games + adaptiveShrinkK);
 
 
     const overRates = Object.fromEntries(
@@ -216,8 +239,8 @@ export function buildDashboardData({
           ? player.weightedOverByLine[lineRef] / player.weightedGames
           : 0;
         const finalRate =
-          (playerLineRate * player.games + leagueOverLines[lineRef] * shrinkK) /
-          (player.games + shrinkK);
+          (playerLineRate * player.games + leagueOverLines[lineRef] * adaptiveShrinkK) /
+          (player.games + adaptiveShrinkK);
         return [lineRef, finalRate];
       })
     ) as Record<number, number>;
@@ -271,6 +294,8 @@ export function buildDashboardData({
   let attempts = 0;
   let hits = 0;
   let baselineLeagueHits = 0;
+  let baselineOddsHits = 0;
+  let baselineRecentHits = 0;
   const leaguePredictOver = (leagueOverLines[line] ?? 0) >= 0.5;
 
   recentBacktestSample.forEach((match) => {
@@ -284,10 +309,30 @@ export function buildDashboardData({
     if ((leaguePredictOver && isOver) || (!leaguePredictOver && !isOver)) {
       baselineLeagueHits += 1;
     }
+
+    const impliedOverProb =
+      match.oddOverClose && match.oddOverClose > 1 ? 1 / match.oddOverClose : leagueOverLines[line] ?? 0.5;
+    const oddsSignal: "over" | "under" = impliedOverProb >= 0.5 ? "over" : "under";
+    if ((oddsSignal === "over" && isOver) || (oddsSignal === "under" && !isOver)) {
+      baselineOddsHits += 1;
+    }
+
+    const trainingWindow = chronological
+      .filter((item) => +new Date(item.dateTime) < +new Date(match.dateTime))
+      .slice(-20);
+    const recentOverRate = trainingWindow.length
+      ? trainingWindow.filter((item) => item.homeGoals + item.awayGoals > line).length / trainingWindow.length
+      : 0.5;
+    const recentSignal: "over" | "under" = recentOverRate >= 0.5 ? "over" : "under";
+    if ((recentSignal === "over" && isOver) || (recentSignal === "under" && !isOver)) {
+      baselineRecentHits += 1;
+    }
   });
 
   const hitRate = attempts ? hits / attempts : 0;
   const baselineLeagueHitRate = attempts ? baselineLeagueHits / attempts : 0;
+  const baselineOddsHitRate = safeRate(baselineOddsHits, attempts);
+  const baselineRecentHitRate = safeRate(baselineRecentHits, attempts);
   const baselineRandomHitRate = attempts ? 0.5 : 0;
 
   const minTrainGames = decisionMode === "conservador" ? 12 : 8;
@@ -353,12 +398,15 @@ export function buildDashboardData({
       ? { edge: 0.28, certainty: 0.36, sample: 0.22, backtest: 0.14 }
       : { edge: 0.45, certainty: 0.2, sample: 0.1, backtest: 0.25 };
 
+  const wfUpliftScore = clamp01((walkForwardHitRate - walkForwardBaselineLeagueHitRate + 0.12) / 0.24);
+
   const decisionScore = Math.round(
     100 *
       (edgeMagnitude * modeWeights.edge +
         certaintyScore * modeWeights.certainty +
         sampleScore * modeWeights.sample +
-        backtestScore * modeWeights.backtest)
+        backtestScore * modeWeights.backtest +
+        wfUpliftScore * 0.1)
   );
 
   let decisionSignal: "over" | "under" | "neutro" = "neutro";
@@ -377,7 +425,7 @@ export function buildDashboardData({
     intervalWidth <= (decisionMode === "conservador" ? 0.24 : 0.3) &&
     edgeVsNeutral >= adaptiveEdgeThreshold &&
     (walkForwardAttempts < 8 || walkForwardHitRate >= walkForwardBaselineLeagueHitRate) &&
-    hitRate >= baselineLeagueHitRate;
+    hitRate >= Math.max(baselineLeagueHitRate, baselineOddsHitRate);
 
   decisionSignal = antiFalseSignalPassed ? rawDecisionSignal : "neutro";
 
@@ -385,7 +433,137 @@ export function buildDashboardData({
   if (decisionScore >= 75) decisionConfidence = "alta";
   else if (decisionScore >= 55) decisionConfidence = "media";
 
+  const uniquePairs = new Set(filtered.map((item) => `${item.homeNick}|${item.awayNick}`)).size;
+  const nickCount = new Map<string, number>();
+  const teamCount = new Map<string, number>();
+  filtered.forEach((item) => {
+    nickCount.set(item.homeNick, (nickCount.get(item.homeNick) ?? 0) + 1);
+    nickCount.set(item.awayNick, (nickCount.get(item.awayNick) ?? 0) + 1);
+    teamCount.set(item.homeTeam, (teamCount.get(item.homeTeam) ?? 0) + 1);
+    teamCount.set(item.awayTeam, (teamCount.get(item.awayTeam) ?? 0) + 1);
+  });
+
+  const totalSides = filtered.length * 2;
+  const topNickShare = totalSides
+    ? Math.max(...[...nickCount.values(), 0]) / totalSides
+    : 0;
+  const topTeamShare = totalSides
+    ? Math.max(...[...teamCount.values(), 0]) / totalSides
+    : 0;
+  const uniquePairRatio = filtered.length ? uniquePairs / filtered.length : 0;
+  const lowSample = leagueEffectiveSample < 12;
+  const biasReasons: string[] = [];
+  if (lowSample) biasReasons.push("Amostra efetiva baixa para decisão robusta.");
+  if (topNickShare > 0.2) biasReasons.push("Concentração alta em poucos jogadores.");
+  if (topTeamShare > 0.22) biasReasons.push("Concentração alta em poucos times.");
+  if (uniquePairRatio < 0.35) biasReasons.push("Baixa diversidade de confrontos.");
+  const biasLevel: "baixo" | "medio" | "alto" =
+    biasReasons.length >= 3 ? "alto" : biasReasons.length >= 1 ? "medio" : "baixo";
+
+  const recentWindowMatches = chronological.slice(-30);
+  const previousWindowMatches = chronological.slice(-60, -30);
+  const overRateRecent = safeRate(
+    recentWindowMatches.filter((item) => item.homeGoals + item.awayGoals > line).length,
+    recentWindowMatches.length
+  );
+  const overRatePrev = safeRate(
+    previousWindowMatches.filter((item) => item.homeGoals + item.awayGoals > line).length,
+    previousWindowMatches.length
+  );
+  const bttsRecent = safeRate(
+    recentWindowMatches.filter((item) => item.homeGoals > 0 && item.awayGoals > 0).length,
+    recentWindowMatches.length
+  );
+  const bttsPrev = safeRate(
+    previousWindowMatches.filter((item) => item.homeGoals > 0 && item.awayGoals > 0).length,
+    previousWindowMatches.length
+  );
+  const avgGoalsRecent = recentWindowMatches.length
+    ? recentWindowMatches.reduce((acc, item) => acc + item.homeGoals + item.awayGoals, 0) / recentWindowMatches.length
+    : 0;
+  const avgGoalsPrev = previousWindowMatches.length
+    ? previousWindowMatches.reduce((acc, item) => acc + item.homeGoals + item.awayGoals, 0) / previousWindowMatches.length
+    : 0;
+
+  const driftMagnitude = Math.max(
+    Math.abs(overRateRecent - overRatePrev),
+    Math.abs(bttsRecent - bttsPrev),
+    Math.abs(avgGoalsRecent - avgGoalsPrev) / 2
+  );
+  const driftLevel: "estavel" | "atencao" | "critico" =
+    driftMagnitude >= 0.18 ? "critico" : driftMagnitude >= 0.1 ? "atencao" : "estavel";
+
+  const sensitivityFactors = [0.8, 0.85, 0.9, 0.95];
+  const sensitivityScenarios = sensitivityFactors.map((factor) => {
+    let weightedGames = 0;
+    let weightedOver = 0;
+    filtered.forEach((match, index) => {
+      const weight = recencyOn ? Math.pow(factor, index) : 1;
+      weightedGames += weight;
+      if (match.homeGoals + match.awayGoals > line) weightedOver += weight;
+    });
+    return {
+      recencyFactor: factor,
+      overRate: weightedGames > 0 ? weightedOver / weightedGames : 0,
+    };
+  });
+  const sensitivitySpread =
+    sensitivityScenarios.length > 0
+      ? Math.max(...sensitivityScenarios.map((item) => item.overRate)) -
+        Math.min(...sensitivityScenarios.map((item) => item.overRate))
+      : 0;
+
+  const calibrationPairs = [] as Array<{ predicted: number; observed: number }>;
+  for (let i = minTrainGames; i < chronological.length; i += 1) {
+    const train = chronological.slice(0, i);
+    const evalMatch = chronological[i];
+    if (!evalMatch || train.length === 0) continue;
+    const predicted =
+      train.filter((item) => item.homeGoals + item.awayGoals > line).length / train.length;
+    const observed = evalMatch.homeGoals + evalMatch.awayGoals > line ? 1 : 0;
+    calibrationPairs.push({ predicted, observed });
+  }
+
+  const brierScore = calibrationPairs.length
+    ? calibrationPairs.reduce((acc, item) => acc + (item.predicted - item.observed) ** 2, 0) /
+      calibrationPairs.length
+    : 0;
+
+  const bins = [0, 0.2, 0.4, 0.6, 0.8, 1];
+  const calibrationByBin = bins.slice(0, -1).map((start, idx) => {
+    const end = bins[idx + 1] ?? 1;
+    const inBin = calibrationPairs.filter((item) =>
+      idx === bins.length - 2
+        ? item.predicted >= start && item.predicted <= end
+        : item.predicted >= start && item.predicted < end
+    );
+    const predicted = inBin.length
+      ? inBin.reduce((acc, item) => acc + item.predicted, 0) / inBin.length
+      : 0;
+    const observed = inBin.length
+      ? inBin.reduce((acc, item) => acc + item.observed, 0) / inBin.length
+      : 0;
+    return {
+      label: `${Math.round(start * 100)}-${Math.round(end * 100)}%`,
+      predicted,
+      observed,
+      count: inBin.length,
+    };
+  });
+
+  const contrarianReasons: string[] = [];
+  if (biasLevel !== "baixo") contrarianReasons.push("Viés de amostra pode distorcer o sinal.");
+  if (driftLevel !== "estavel") contrarianReasons.push("Drift recente indica mudança de regime.");
+  if (selectedOverInterval.high - selectedOverInterval.low > 0.28) {
+    contrarianReasons.push("Intervalo de confiança muito largo para entrada segura.");
+  }
+  if (hitRate < baselineOddsHitRate) contrarianReasons.push("Modelo abaixo da baseline das odds no recorte recente.");
+
   const isBettable = antiFalseSignalPassed && decisionSignal !== "neutro";
+
+  let semaphore: "verde" | "amarelo" | "vermelho" = "vermelho";
+  if (isBettable && biasLevel === "baixo" && driftLevel === "estavel") semaphore = "verde";
+  else if (decisionScore >= 55 && antiFalseSignalPassed) semaphore = "amarelo";
 
   const executiveSummary = [
     `Sinal final: ${decisionSignal.toUpperCase()} (${decisionMode}).`,
@@ -393,6 +571,7 @@ export function buildDashboardData({
     `IC95% Over ${line}: ${(selectedOverInterval.low * 100).toFixed(1)}–${(selectedOverInterval.high * 100).toFixed(1)}%.`,
     `Backtest ${(hitRate * 100).toFixed(1)}% vs liga ${(baselineLeagueHitRate * 100).toFixed(1)}%.`,
     `Walk-forward ${(walkForwardHitRate * 100).toFixed(1)}% vs baseline ${(walkForwardBaselineLeagueHitRate * 100).toFixed(1)}% (${walkForwardAttempts} sinais).`,
+    `Semáforo: ${semaphore.toUpperCase()} (${biasLevel === "alto" ? "viés alto" : driftLevel === "critico" ? "drift crítico" : "contexto controlado"}).`,
     isBettable
       ? "Cenário apostável no filtro atual."
       : "Cenário não apostável: critérios de proteção ativos.",
@@ -429,23 +608,55 @@ export function buildDashboardData({
       hitRate,
       baselineRandomHitRate,
       baselineLeagueHitRate,
+      baselineOddsHitRate,
+      baselineRecentHitRate,
       upliftVsRandom: hitRate - baselineRandomHitRate,
       upliftVsLeague: hitRate - baselineLeagueHitRate,
+      upliftVsOdds: hitRate - baselineOddsHitRate,
+      upliftVsRecent: hitRate - baselineRecentHitRate,
       walkForwardAttempts,
       walkForwardHits,
       walkForwardHitRate,
       walkForwardBaselineLeagueHitRate,
       walkForwardUpliftVsLeague: walkForwardHitRate - walkForwardBaselineLeagueHitRate,
     },
+    calibration: {
+      brierScore,
+      byBin: calibrationByBin,
+    },
+    drift: {
+      recentWindow: recentWindowMatches.length,
+      previousWindow: previousWindowMatches.length,
+      deltaOver: overRateRecent - overRatePrev,
+      deltaBtts: bttsRecent - bttsPrev,
+      deltaAvgGoals: avgGoalsRecent - avgGoalsPrev,
+      level: driftLevel,
+    },
+    bias: {
+      uniquePairRatio,
+      topNickShare,
+      topTeamShare,
+      lowSample,
+      level: biasLevel,
+      reasons: biasReasons,
+    },
+    sensitivity: {
+      spread: sensitivitySpread,
+      stable: sensitivitySpread <= 0.08,
+      scenarios: sensitivityScenarios,
+    },
     decision: {
       mode: decisionMode,
       score: decisionScore,
       signal: decisionSignal,
       confidence: decisionConfidence,
+      semaphore,
       antiFalseSignalPassed,
       isBettable,
       adaptiveEdgeThreshold,
       edgeVsNeutral,
+      entryCondition: `Entrar apenas se semáforo verde/amarelo, edge >= ${(adaptiveEdgeThreshold * 100).toFixed(1)}pp e Brier <= 0.25.`,
+      abortCondition: "Abortar se semáforo vermelho, drift crítico ou viés alto.",
       reasons: [
         `Edge da linha ${line}: ${((leagueOverLines[line] ?? 0) * 100).toFixed(1)}%`,
         `IC95% Over ${line}: ${(selectedOverInterval.low * 100).toFixed(1)}–${(selectedOverInterval.high * 100).toFixed(1)}%`,
@@ -454,6 +665,7 @@ export function buildDashboardData({
         `Threshold adaptativo: ${(adaptiveEdgeThreshold * 100).toFixed(1)}pp (edge atual ${(edgeVsNeutral * 100).toFixed(1)}pp)`,
         antiFalseSignalPassed ? "Anti-falso-sinal: aprovado" : "Anti-falso-sinal: bloqueado",
       ],
+      contrarianReasons,
     },
     executiveSummary,
     explainability: {

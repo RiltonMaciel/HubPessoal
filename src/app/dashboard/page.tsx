@@ -5,7 +5,6 @@ import { v4 as uuidv4 } from "uuid";
 import { db } from "@/lib/db";
 import { buildDashboardData } from "@/lib/analytics";
 import { formatDateTimePtBr, toIsoDateTime } from "@/lib/datetime";
-import { getSeedMatches, getSeedUpcoming } from "@/lib/seed";
 import type { DataQualityReport, FilterPresetRecord, MatchRecord, PlayerSummary, UpcomingRecord } from "@/lib/types";
 import { useAppStore } from "@/store/appStore";
 import { Badge } from "@/components/ui/Badge";
@@ -43,6 +42,12 @@ const HELP = {
   recentGames: "Tabela dos jogos recentes do recorte atual.\nPermite auditoria visual do padrão de resultados.\nCSV exporta essa visão para análise externa.",
   backtest: "Teste retrospectivo dos picks recentes do modelo.\nCompara taxa de acerto com baseline aleatório e baseline da liga.\nUplift positivo sugere vantagem no recorte.",
   quality: "Qualidade da importação e consistência dos dados.\nMostra remoções por regra e possíveis problemas por liga.\nUse para validar se o dataset está confiável.",
+  calibration: "Calibração compara probabilidade prevista vs resultado real.\nBrier Score mais baixo indica melhor qualidade probabilística.\nBins mostram se o modelo está super/ subestimando.",
+  drift: "Drift detecta mudança de regime entre janelas recentes e anteriores.\nSe o drift estiver crítico, sinais antigos podem perder validade.\nUse para evitar decisões em cenário instável.",
+  bias: "Diagnóstico de viés mede concentração e diversidade de confrontos.\nConcentração alta pode inflar falso sinal.\nUse junto do semáforo para bloquear entradas frágeis.",
+  sensitivity: "Sensibilidade testa estabilidade do Over ao variar recencyFactor.\nSpread baixo indica recomendação robusta.\nSpread alto exige cautela extra.",
+  history: "Histórico de decisões ajuda auditar consistência do processo.\nCada snapshot salva contexto e sinal do momento.\nIdeal para aprender com acertos e erros.",
+  contrarian: "Explicação contrária lista motivos para não entrar no mercado.\nReduz viés de confirmação e melhora disciplina.\nSempre valide este bloco antes de decidir.",
 } as const;
 
 function confidenceTone(conf: PlayerSummary["confidence"]) {
@@ -59,6 +64,12 @@ function decisionSignalLabel(signal: "over" | "under" | "neutro") {
   if (signal === "over") return "Tendência Over";
   if (signal === "under") return "Tendência Under";
   return "Sem sinal";
+}
+
+function semaphoreTone(semaphore: "verde" | "amarelo" | "vermelho") {
+  if (semaphore === "verde") return "good" as const;
+  if (semaphore === "amarelo") return "warn" as const;
+  return "bad" as const;
 }
 
 function simplifyDecisionReason(reason: string) {
@@ -148,6 +159,7 @@ export default function DashboardPage() {
   const [showRankingFull, setShowRankingFull] = useState(false);
   const [showUpcomingFull, setShowUpcomingFull] = useState(false);
   const [actionNote, setActionNote] = useState("");
+  const [decisionHistory, setDecisionHistory] = useState<Array<{ at: string; score: number; signal: string; semaphore: string; league: string; line: number }>>([]);
 
   const jumpTo = (id: string) => {
     const element = document.getElementById(id);
@@ -167,8 +179,8 @@ export default function DashboardPage() {
         db.rawDatasets.get("latest"),
       ]);
 
-      const effectiveMatches = matchRows.length ? matchRows : getSeedMatches();
-      const effectiveUpcoming = upcomingRows.length ? upcomingRows : getSeedUpcoming();
+      const effectiveMatches = matchRows;
+      const effectiveUpcoming = upcomingRows;
 
       setMatches(effectiveMatches);
       setUpcoming(effectiveUpcoming);
@@ -234,6 +246,36 @@ export default function DashboardPage() {
     const leagueGames = matches.filter((item) => league === "all" || item.league === league).length;
     setWarning(leagueGames > 0 && leagueGames < 20 ? "Liga com poucos jogos: confiabilidade rebaixada em um nível." : "");
   }, [matches, league]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem("hubpessoal-decision-history-v1");
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as Array<{ at: string; score: number; signal: string; semaphore: string; league: string; line: number }>;
+      setDecisionHistory(parsed.slice(0, 12));
+    } catch {
+      localStorage.removeItem("hubpessoal-decision-history-v1");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isLoading || !dashboard.totalGames) return;
+    const item = {
+      at: new Date().toISOString(),
+      score: dashboard.decision.score,
+      signal: dashboard.decision.signal,
+      semaphore: dashboard.decision.semaphore,
+      league,
+      line,
+    };
+    setDecisionHistory((prev) => {
+      const next = [item, ...prev]
+        .filter((value, index, arr) => index === arr.findIndex((x) => x.at === value.at))
+        .slice(0, 20);
+      localStorage.setItem("hubpessoal-decision-history-v1", JSON.stringify(next));
+      return next;
+    });
+  }, [dashboard.decision.score, dashboard.decision.signal, dashboard.decision.semaphore, league, line, isLoading]);
 
   const topPicks = useMemo(() => [...players].sort((a, b) => b.ppgFinal - a.ppgFinal).slice(0, 3), [players]);
 
@@ -448,11 +490,16 @@ export default function DashboardPage() {
         <CardBody>
           <div className="chips" style={{ marginBottom: 10 }}>
             <Badge tone={dashboard.decision.score >= 75 ? "good" : dashboard.decision.score >= 55 ? "warn" : "bad"}>Score: {dashboard.decision.score}</Badge>
+            <Badge tone={semaphoreTone(dashboard.decision.semaphore)}>Semáforo: {dashboard.decision.semaphore.toUpperCase()}</Badge>
             <Badge tone={dashboard.decision.signal === "over" ? "good" : dashboard.decision.signal === "under" ? "warn" : "bad"}>Sinal: {decisionSignalLabel(dashboard.decision.signal)}</Badge>
             <Badge tone={confidenceTone(dashboard.decision.confidence)}>Confiança: {dashboard.decision.confidence}</Badge>
             <Badge tone={dashboard.decision.antiFalseSignalPassed ? "good" : "warn"}>Proteção: {dashboard.decision.antiFalseSignalPassed ? "Aprovada" : "Bloqueada"}</Badge>
             <Badge>Régua: {(dashboard.decision.adaptiveEdgeThreshold * 100).toFixed(1)}pp <InfoHint text={HELP.adaptiveThreshold} /></Badge>
             <Badge tone={dashboard.decision.isBettable ? "good" : "bad"}>Apostável: {dashboard.decision.isBettable ? "SIM" : "NÃO"}</Badge>
+          </div>
+          <div style={{ marginBottom: 10 }}>
+            <small style={{ color: "var(--muted)" }}><b>Entrada:</b> {dashboard.decision.entryCondition}</small><br />
+            <small style={{ color: "var(--muted)" }}><b>Abortar:</b> {dashboard.decision.abortCondition}</small>
           </div>
           <div className="list" style={{ marginBottom: 12 }}>
             {dashboard.decision.reasons.map((reason) => (
@@ -461,6 +508,20 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
+
+          {!!dashboard.decision.contrarianReasons.length && (
+            <div style={{ marginBottom: 12 }}>
+              <small style={{ color: "var(--warning)", display: "inline-flex", alignItems: "center" }}>
+                Explicação contrária <InfoHint text={HELP.contrarian} />
+              </small>
+              <div className="list">
+                {dashboard.decision.contrarianReasons.map((item) => (
+                  <div key={item} className="row"><div className="left"><small>{item}</small></div></div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {!topPicks.length && <EmptyState title="Sem dados" subtitle="Importe uma planilha para ver picks." />}
           <div className="list">
             {topPicks.map((player) => (
@@ -473,6 +534,52 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
+        </CardBody>
+      </Card>
+
+      <Card className="col-8" id="card-assertividade">
+        <CardHeader>
+          <div><h3>Assertividade do modelo <InfoHint text={HELP.calibration} /></h3><small>Calibração, drift, viés e sensibilidade</small></div>
+        </CardHeader>
+        <CardBody>
+          <div className="chips" style={{ marginBottom: 10 }}>
+            <Badge tone={dashboard.calibration.brierScore <= 0.2 ? "good" : dashboard.calibration.brierScore <= 0.28 ? "warn" : "bad"}>
+              Brier: {dashboard.calibration.brierScore.toFixed(3)}
+            </Badge>
+            <Badge tone={dashboard.drift.level === "estavel" ? "good" : dashboard.drift.level === "atencao" ? "warn" : "bad"}>
+              Drift: {dashboard.drift.level}
+            </Badge>
+            <Badge tone={dashboard.bias.level === "baixo" ? "good" : dashboard.bias.level === "medio" ? "warn" : "bad"}>
+              Viés: {dashboard.bias.level}
+            </Badge>
+            <Badge tone={dashboard.sensitivity.stable ? "good" : "warn"}>
+              Sensibilidade spread: {(dashboard.sensitivity.spread * 100).toFixed(1)}pp
+            </Badge>
+          </div>
+
+          <div className="list" style={{ marginBottom: 10 }}>
+            {dashboard.calibration.byBin.map((bin) => (
+              <div key={bin.label} className="row">
+                <div className="left"><small>{bin.label} • n={bin.count}</small></div>
+                <div className="metric"><small>prev {(bin.predicted * 100).toFixed(1)}% vs obs {(bin.observed * 100).toFixed(1)}%</small></div>
+              </div>
+            ))}
+          </div>
+
+          <div className="chips" style={{ marginBottom: 10 }}>
+            <Badge>ΔOver: {(dashboard.drift.deltaOver * 100).toFixed(1)}pp <InfoHint text={HELP.drift} /></Badge>
+            <Badge>ΔBTTS: {(dashboard.drift.deltaBtts * 100).toFixed(1)}pp</Badge>
+            <Badge>ΔGols: {dashboard.drift.deltaAvgGoals.toFixed(2)}</Badge>
+            <Badge>Pair ratio: {(dashboard.bias.uniquePairRatio * 100).toFixed(1)}% <InfoHint text={HELP.bias} /></Badge>
+          </div>
+
+          {!!dashboard.bias.reasons.length && (
+            <div className="list">
+              {dashboard.bias.reasons.map((reason) => (
+                <div key={reason} className="row"><div className="left"><small>{reason}</small></div></div>
+              ))}
+            </div>
+          )}
         </CardBody>
       </Card>
 
@@ -570,8 +677,12 @@ export default function DashboardPage() {
             <Badge tone={dashboard.backtest.hitRate >= 0.55 ? "good" : dashboard.backtest.hitRate >= 0.5 ? "warn" : "bad"}>Hit rate: {(dashboard.backtest.hitRate * 100).toFixed(1)}%</Badge>
             <Badge>Baseline rand: {(dashboard.backtest.baselineRandomHitRate * 100).toFixed(1)}%</Badge>
             <Badge>Baseline liga: {(dashboard.backtest.baselineLeagueHitRate * 100).toFixed(1)}%</Badge>
+            <Badge>Baseline odds: {(dashboard.backtest.baselineOddsHitRate * 100).toFixed(1)}%</Badge>
+            <Badge>Baseline rec.20: {(dashboard.backtest.baselineRecentHitRate * 100).toFixed(1)}%</Badge>
             <Badge tone={dashboard.backtest.upliftVsRandom >= 0 ? "good" : "bad"}>Δ rand: {(dashboard.backtest.upliftVsRandom * 100).toFixed(1)}pp</Badge>
             <Badge tone={dashboard.backtest.upliftVsLeague >= 0 ? "good" : "bad"}>Δ liga: {(dashboard.backtest.upliftVsLeague * 100).toFixed(1)}pp</Badge>
+            <Badge tone={dashboard.backtest.upliftVsOdds >= 0 ? "good" : "bad"}>Δ odds: {(dashboard.backtest.upliftVsOdds * 100).toFixed(1)}pp</Badge>
+            <Badge tone={dashboard.backtest.upliftVsRecent >= 0 ? "good" : "bad"}>Δ rec.20: {(dashboard.backtest.upliftVsRecent * 100).toFixed(1)}pp</Badge>
             <Badge>Walk-forward: {(dashboard.backtest.walkForwardHitRate * 100).toFixed(1)}% <InfoHint text={HELP.walkForward} /></Badge>
             <Badge>WF sinais: {dashboard.backtest.walkForwardAttempts}</Badge>
             <Badge tone={dashboard.backtest.walkForwardUpliftVsLeague >= 0 ? "good" : "bad"}>WF Δ liga: {(dashboard.backtest.walkForwardUpliftVsLeague * 100).toFixed(1)}pp</Badge>
@@ -580,6 +691,31 @@ export default function DashboardPage() {
             <p style={{ marginTop: 10, color: "var(--warning)", fontSize: 12 }}>
               Edge frágil (&lt;5pp vs liga): {dashboard.explainability.fragileEdgePlayers.join(", ")}
             </p>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card className="col-12" id="card-history">
+        <CardHeader><div><h3>Histórico de decisões <InfoHint text={HELP.history} /></h3><small>Snapshots locais de contexto decisional</small></div></CardHeader>
+        <CardBody>
+          {!decisionHistory.length ? (
+            <EmptyState title="Sem histórico" subtitle="O histórico será preenchido conforme você navega no dashboard." />
+          ) : (
+            <Table>
+              <thead><tr><th>Data</th><th>Liga</th><th>Linha</th><th>Sinal</th><th className="right">Score</th><th className="right">Semáforo</th></tr></thead>
+              <tbody>
+                {decisionHistory.slice(0, 12).map((item) => (
+                  <tr key={item.at}>
+                    <td>{formatDateTimePtBr(item.at)}</td>
+                    <td>{item.league === "all" ? "Todas" : item.league}</td>
+                    <td>{item.line}</td>
+                    <td>{item.signal}</td>
+                    <td className="right">{item.score}</td>
+                    <td className="right"><Badge tone={item.semaphore === "verde" ? "good" : item.semaphore === "amarelo" ? "warn" : "bad"}>{item.semaphore}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
           )}
         </CardBody>
       </Card>

@@ -7,9 +7,12 @@ import { useAppStore } from "@/store/appStore";
 import { db } from "@/lib/db";
 import { Button } from "@/components/ui/Button";
 
+const PLAYERS_CACHE_KEY = "hubpessoal-topbar-players-cache-v1";
+
 const routeTitles: Record<string, { crumbs: string; title: string }> = {
   "/dashboard": { crumbs: "Analytics / Dashboard", title: "Command Center" },
   "/import": { crumbs: "Analytics / Import", title: "Importador Excel" },
+  "/aovivo": { crumbs: "Analytics / AoVivo", title: "Monitor Ao Vivo" },
   "/h2h": { crumbs: "Analytics / Confronto", title: "Head-to-Head" },
   "/notes": { crumbs: "Organização / Notas", title: "Knowledge Notes" },
   "/calendar": { crumbs: "Organização / Calendário", title: "Calendar Hub" },
@@ -19,6 +22,7 @@ const routeTitles: Record<string, { crumbs: string; title: string }> = {
 const quickRoutes = [
   { label: "Dashboard", href: "/dashboard" },
   { label: "Importar", href: "/import" },
+  { label: "AoVivo", href: "/aovivo" },
   { label: "Confronto H2H", href: "/h2h" },
   { label: "Notas", href: "/notes" },
   { label: "Calendário", href: "/calendar" },
@@ -52,15 +56,41 @@ export function Topbar({ onOpenMenu }: { onOpenMenu: () => void }) {
   ]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const hydrateFromCache = () => {
+      try {
+        const raw = window.localStorage.getItem(PLAYERS_CACHE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as { players?: string[] };
+        if (!Array.isArray(parsed.players) || !parsed.players.length) return;
+        setPlayers(parsed.players.filter(Boolean));
+      } catch {
+        window.localStorage.removeItem(PLAYERS_CACHE_KEY);
+      }
+    };
+
+    hydrateFromCache();
+
     void (async () => {
-      const rows = await db.matches.toArray();
-      const nicks = new Set<string>();
-      rows.forEach((row) => {
-        nicks.add(row.homeNick);
-        nicks.add(row.awayNick);
-      });
-      setPlayers([...nicks]);
+      const [homeNickKeys, awayNickKeys] = await Promise.all([
+        db.matches.orderBy("homeNick").keys(),
+        db.matches.orderBy("awayNick").keys(),
+      ]);
+
+      const nextPlayers = [...new Set([...homeNickKeys, ...awayNickKeys]
+        .map((item) => String(item).trim())
+        .filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b));
+
+      if (cancelled) return;
+      setPlayers(nextPlayers);
+      window.localStorage.setItem(PLAYERS_CACHE_KEY, JSON.stringify({ players: nextPlayers }));
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const page = useMemo(() => {

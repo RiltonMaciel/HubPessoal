@@ -166,8 +166,12 @@ export type BacktestSummary = {
   hitRate: number;
   baselineRandomHitRate: number;
   baselineLeagueHitRate: number;
+  baselineOddsHitRate: number;
+  baselineRecentHitRate: number;
   upliftVsRandom: number;
   upliftVsLeague: number;
+  upliftVsOdds: number;
+  upliftVsRecent: number;
   walkForwardAttempts: number;
   walkForwardHits: number;
   walkForwardHitRate: number;
@@ -175,16 +179,61 @@ export type BacktestSummary = {
   walkForwardUpliftVsLeague: number;
 };
 
+export type CalibrationBin = {
+  label: string;
+  predicted: number;
+  observed: number;
+  count: number;
+};
+
+export type CalibrationSummary = {
+  brierScore: number;
+  byBin: CalibrationBin[];
+};
+
+export type DriftSummary = {
+  recentWindow: number;
+  previousWindow: number;
+  deltaOver: number;
+  deltaBtts: number;
+  deltaAvgGoals: number;
+  level: "estavel" | "atencao" | "critico";
+};
+
+export type BiasSummary = {
+  uniquePairRatio: number;
+  topNickShare: number;
+  topTeamShare: number;
+  lowSample: boolean;
+  level: "baixo" | "medio" | "alto";
+  reasons: string[];
+};
+
+export type SensitivityScenario = {
+  recencyFactor: number;
+  overRate: number;
+};
+
+export type SensitivitySummary = {
+  spread: number;
+  stable: boolean;
+  scenarios: SensitivityScenario[];
+};
+
 export type DecisionSummary = {
   mode: DecisionMode;
   score: number;
   signal: "over" | "under" | "neutro";
   confidence: Confidence;
+  semaphore: "verde" | "amarelo" | "vermelho";
   antiFalseSignalPassed: boolean;
   isBettable: boolean;
   adaptiveEdgeThreshold: number;
   edgeVsNeutral: number;
+  entryCondition: string;
+  abortCondition: string;
   reasons: string[];
+  contrarianReasons: string[];
 };
 
 export type DashboardData = {
@@ -207,6 +256,10 @@ export type DashboardData = {
   players: PlayerSummary[];
   recentMatches: MatchRecord[];
   backtest: BacktestSummary;
+  calibration: CalibrationSummary;
+  drift: DriftSummary;
+  bias: BiasSummary;
+  sensitivity: SensitivitySummary;
   decision: DecisionSummary;
   executiveSummary: string[];
   explainability: {

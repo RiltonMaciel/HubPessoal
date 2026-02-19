@@ -25,7 +25,7 @@ function parseLine(line: string) {
 
 export default function BetsApiPage() {
   const [url, setUrl] = useState(DEFAULT_URL);
-  const [maxPages, setMaxPages] = useState(1000);
+  const [maxPages, setMaxPages] = useState(5000);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ExportResponse | null>(null);
@@ -109,8 +109,8 @@ export default function BetsApiPage() {
       <Card className="col-12">
         <CardHeader>
           <div>
-            <h3>Coletor BetsAPI (até 1000 páginas)</h3>
-            <small>Formato de saída: MM/DD HH:mm - Time A v Time B X-Y</small>
+            <h3>Coletor BetsAPI (até 5000 páginas)</h3>
+            <small>Formato de saída: MM/DD HH:mm - Time A v Time B X-Y • histórico via aba Fixtures automático</small>
           </div>
           <Badge tone="warn">Web scraping</Badge>
         </CardHeader>
@@ -134,7 +134,7 @@ export default function BetsApiPage() {
             <input
               type="number"
               min={1}
-              max={1000}
+              max={5000}
               value={maxPages}
               onChange={(event) => setMaxPages(Number(event.target.value))}
               style={{
@@ -153,7 +153,7 @@ export default function BetsApiPage() {
           </div>
 
           <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <Badge>{`Limite: ${Math.min(1000, Math.max(1, maxPages))} páginas`}</Badge>
+            <Badge>{`Limite: ${Math.min(5000, Math.max(1, maxPages))} páginas`}</Badge>
             {result ? <Badge tone="good">{`${result.total} jogos`}</Badge> : null}
             {result ? <Badge>{`${result.pagesProcessed} páginas lidas`}</Badge> : null}
           </div>
@@ -203,7 +203,7 @@ export default function BetsApiPage() {
             </div>
           ) : (
             <div style={{ marginTop: 14 }}>
-              <EmptyState title="Sem coleta" description="Informe a URL, selecione o limite de páginas e clique em Coletar jogos." />
+              <EmptyState title="Sem coleta" subtitle="Informe a URL, selecione o limite de páginas e clique em Coletar jogos." />
             </div>
           )}
         </CardBody>

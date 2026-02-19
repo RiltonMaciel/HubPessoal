@@ -4,7 +4,6 @@ import * as XLSX from "xlsx";
 import { useEffect, useMemo, useState } from "react";
 import { db } from "@/lib/db";
 import { parseRawTextMatches } from "@/lib/excel";
-import { getSeedMatches } from "@/lib/seed";
 import type { MatchRecord } from "@/lib/types";
 import { formatDateTimePtBr, toDateTimestamp, toIsoDateTime } from "@/lib/datetime";
 import { Badge } from "@/components/ui/Badge";
@@ -150,6 +149,30 @@ function buildMatchFingerprint(match: MatchRecord) {
   ].join("|");
 }
 
+function buildNickIndex(matches: MatchRecord[]) {
+  const map = new Map<string, MatchRecord[]>();
+
+  const push = (nick: string, match: MatchRecord) => {
+    const key = normalize(nick);
+    if (!key) return;
+    const bucket = map.get(key);
+    if (bucket) {
+      bucket.push(match);
+      return;
+    }
+    map.set(key, [match]);
+  };
+
+  matches.forEach((match) => {
+    push(match.homeNick, match);
+    if (normalize(match.awayNick) !== normalize(match.homeNick)) {
+      push(match.awayNick, match);
+    }
+  });
+
+  return map;
+}
+
 function includesText(source: string, search: string) {
   if (!search.trim()) return true;
   return source.toLowerCase().includes(search.trim().toLowerCase());
@@ -244,7 +267,7 @@ function buildPlayerStats(matches: MatchRecord[], nick: string, line: number): P
 }
 
 function aggregateAgainstOpponents(
-  matches: MatchRecord[],
+  playerMatches: MatchRecord[],
   nick: string,
   excludedNick: string,
   teamFilter: string
@@ -252,7 +275,7 @@ function aggregateAgainstOpponents(
   const excluded = normalize(excludedNick);
   const map = new Map<string, OpponentStats>();
 
-  matches.forEach((match) => {
+  playerMatches.forEach((match) => {
     const side = getPlayerSide(match, nick);
     if (!side) return;
     if (!playerMatchesTeam(match, nick, teamFilter)) return;
@@ -420,7 +443,7 @@ export default function HeadToHeadPage() {
   useEffect(() => {
     void (async () => {
       const rows = await db.matches.toArray();
-      setMatches(rows.length ? rows : getSeedMatches());
+      setMatches(rows);
 
       if (typeof window !== "undefined") {
         const raw = window.localStorage.getItem(LOCAL_EXTRA_KEY);
@@ -449,6 +472,8 @@ export default function HeadToHeadPage() {
     });
     return merged;
   }, [matches, extraMatches]);
+
+  const nickIndex = useMemo(() => buildNickIndex(allMatches), [allMatches]);
 
   const nickOptions = useMemo(() => {
     const set = new Set<string>();
@@ -486,30 +511,29 @@ export default function HeadToHeadPage() {
       };
     }
 
-    const h2hMatches = allMatches
+    const matchesA = nickIndex.get(a) ?? [];
+    const matchesB = nickIndex.get(b) ?? [];
+    const setA = new Set(matchesA);
+    const setB = new Set(matchesB);
+
+    const h2hMatches = matchesA
       .filter((m) => {
-        const hasA = normalize(m.homeNick) === a || normalize(m.awayNick) === a;
-        const hasB = normalize(m.homeNick) === b || normalize(m.awayNick) === b;
-        if (!hasA || !hasB) return false;
+        if (!setB.has(m)) return false;
         if (!playerMatchesTeam(m, playerA, teamA)) return false;
         if (!playerMatchesTeam(m, playerB, teamB)) return false;
         return true;
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
-    const otherA = allMatches
+    const otherA = matchesA
       .filter((m) => {
-        const hasA = normalize(m.homeNick) === a || normalize(m.awayNick) === a;
-        const hasB = normalize(m.homeNick) === b || normalize(m.awayNick) === b;
-        return hasA && !hasB && playerMatchesTeam(m, playerA, teamA);
+        return !setB.has(m) && playerMatchesTeam(m, playerA, teamA);
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
-    const otherB = allMatches
+    const otherB = matchesB
       .filter((m) => {
-        const hasA = normalize(m.homeNick) === a || normalize(m.awayNick) === a;
-        const hasB = normalize(m.homeNick) === b || normalize(m.awayNick) === b;
-        return hasB && !hasA && playerMatchesTeam(m, playerB, teamB);
+        return !setA.has(m) && playerMatchesTeam(m, playerB, teamB);
       })
       .sort((x, y) => toDateTimestamp(y.dateTime) - toDateTimestamp(x.dateTime));
 
@@ -525,8 +549,8 @@ export default function HeadToHeadPage() {
       else draws += 1;
     });
 
-    const mapA = aggregateAgainstOpponents(allMatches, playerA, playerB, teamA);
-    const mapB = aggregateAgainstOpponents(allMatches, playerB, playerA, teamB);
+    const mapA = aggregateAgainstOpponents(matchesA, playerA, playerB, teamA);
+    const mapB = aggregateAgainstOpponents(matchesB, playerB, playerA, teamB);
 
     const commonRows = [...mapA.keys()]
       .filter((key) => mapB.has(key))
@@ -557,7 +581,7 @@ export default function HeadToHeadPage() {
       winsB,
       draws,
     };
-  }, [allMatches, playerA, playerB, teamA, teamB, line]);
+  }, [nickIndex, playerA, playerB, teamA, teamB, line]);
 
   const h2hWindow = useMemo(() => {
     if (!analysis.valid) return [] as MatchRecord[];
@@ -691,13 +715,13 @@ export default function HeadToHeadPage() {
   }, [h2hWindow.length, analysis]);
 
   const teamPerformanceA = useMemo(
-    () => buildTeamPerformance(allMatches, playerA, teamA),
-    [allMatches, playerA, teamA]
+    () => buildTeamPerformance(nickIndex.get(normalize(playerA)) ?? [], playerA, teamA),
+    [nickIndex, playerA, teamA]
   );
 
   const teamPerformanceB = useMemo(
-    () => buildTeamPerformance(allMatches, playerB, teamB),
-    [allMatches, playerB, teamB]
+    () => buildTeamPerformance(nickIndex.get(normalize(playerB)) ?? [], playerB, teamB),
+    [nickIndex, playerB, teamB]
   );
 
   const overUnderMatrix = useMemo(() => {
