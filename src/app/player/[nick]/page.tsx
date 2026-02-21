@@ -7,6 +7,8 @@ import { db } from "@/lib/db";
 import { buildDashboardData } from "@/lib/analytics";
 import { getSeedMatches } from "@/lib/seed";
 import type { MatchRecord } from "@/lib/types";
+import { useAppStore } from "@/store/appStore";
+import { computeSessionFromHistory, computeStyleFromHistory, computeTiltFromHistory, summarizeTeamAffinity } from "@/lib/derived-signals";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -17,6 +19,7 @@ const lines = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
 export default function PlayerPage() {
   const params = useParams<{ nick: string }>();
   const nick = decodeURIComponent(params.nick ?? "");
+  const dataRevision = useAppStore((state) => state.dataRevision);
 
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [avatar, setAvatar] = useState<string | null>(null);
@@ -27,7 +30,7 @@ export default function PlayerPage() {
       setMatches(allMatches.length ? allMatches : getSeedMatches());
       setAvatar(avatarRow?.imageDataUrl ?? null);
     })();
-  }, [nick]);
+  }, [nick, dataRevision]);
 
   const dashboard = useMemo(
     () => buildDashboardData({ matches, league: "all", period: "all", recencyOn: true, line: 6.5, decisionMode: "conservador" }),
@@ -64,6 +67,19 @@ export default function PlayerPage() {
     const status = diff >= 0 ? "acima" : "abaixo";
     return `Últimos 5 com média ${avgLast.toFixed(2)} (${Math.abs(diff).toFixed(2)} ${status} da média geral ${player.totalPerGame.toFixed(2)}), n efetivo ${player.effectiveGames.toFixed(1)}.`;
   }, [player, recentGames]);
+
+  const playerHistory = useMemo(
+    () =>
+      matches
+        .filter((m) => m.homeNick.toLowerCase() === nick.toLowerCase() || m.awayNick.toLowerCase() === nick.toLowerCase())
+        .sort((a, b) => +new Date(a.dateTime) - +new Date(b.dateTime)),
+    [matches, nick]
+  );
+
+  const tilt = useMemo(() => computeTiltFromHistory({ nick, history: playerHistory }), [nick, playerHistory]);
+  const session = useMemo(() => computeSessionFromHistory({ nick, history: playerHistory, gapMinutes: 45 }), [nick, playerHistory]);
+  const style = useMemo(() => computeStyleFromHistory({ nick, history: playerHistory, window: 30 }), [nick, playerHistory]);
+  const topTeams = useMemo(() => summarizeTeamAffinity({ nick, history: playerHistory, minGamesPerTeam: 4, topN: 3 }), [nick, playerHistory]);
 
   const uploadAvatar = async (file: File) => {
     const reader = new FileReader();
@@ -114,6 +130,18 @@ export default function PlayerPage() {
       <Card className="col-6"><CardHeader><div><h3>Últimos 5 jogos</h3><small>Recorte recente</small></div></CardHeader><CardBody><div className="list">{recentGames.map((match) => <div key={match.id} className="row"><div className="left"><div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><PlayerAvatar nick={match.homeNick} size={24} radius={10} /><PlayerAvatar nick={match.awayNick} size={24} radius={10} /></div><div className="nick"><b>{match.homeNick} {match.homeGoals} x {match.awayGoals} {match.awayNick}</b><small>{new Date(match.dateTime).toLocaleString("pt-BR")}</small></div></div></div>)}</div></CardBody></Card>
 
       <Card className="col-6"><CardHeader><div><h3>Insights explicáveis</h3><small>Sem IA, regras determinísticas</small></div></CardHeader><CardBody><div className="list"><div className="row"><span>Linha favorita</span><b>{favoriteLine ? `${favoriteLine.line} (${(favoriteLine.diff * 100).toFixed(1)} pp vs liga)` : "-"}</b></div><div className="row"><span>Tendência recente</span><b>{trend ?? "Sem amostra"}</b></div><div className="row"><span>Força da evidência</span><b>{player.effectiveGames >= 10 ? "Robusta" : player.effectiveGames >= 5 ? "Moderada" : "Frágil"}</b></div></div></CardBody></Card>
+
+      <Card className="col-6"><CardHeader><div><h3>Sinais Contextuais</h3><small>Tilt • Sessão • Estilo • Afinidade</small></div></CardHeader><CardBody>
+        <div className="list">
+          <div className="row"><span>Tilt (últimos 5)</span><b>{tilt.tiltScore === 1 ? "ON FIRE" : tilt.tiltScore === -1 ? "TILT" : "Neutro"} ({tilt.tiltScore})</b></div>
+          <div className="row"><span>WinRate(5)</span><b>{(tilt.winRateLast5 * 100).toFixed(0)}%</b></div>
+          <div className="row"><span>Saldo(5)</span><b>{tilt.goalDiffLast5}</b></div>
+          <div className="row"><span>Sofridos(3)</span><b>{tilt.concededLast3}</b></div>
+          <div className="row"><span>Sessão (gap 45m)</span><b>n={session.sessionGamesCount} • {(session.sessionWinRate * 100).toFixed(0)}% • {session.sessionTrend}</b></div>
+          <div className="row"><span>Estilo (30)</span><b>pace {style.avgTotalGoals.toFixed(2)} • frag {style.avgConceded.toFixed(2)} • vol {style.stdTotalGoals.toFixed(2)}</b></div>
+          <div className="row"><span>Afinidade por time</span><b>{topTeams.length ? topTeams.map((t) => `${t.team} (${(t.deltaWin * 100).toFixed(1)}pp, n=${t.games})`).join(" • ") : "Sem times suficientes"}</b></div>
+        </div>
+      </CardBody></Card>
     </section>
   );
 }

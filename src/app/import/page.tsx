@@ -4,11 +4,15 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { db } from "@/lib/db";
 import { buildDashboardData } from "@/lib/analytics";
+import { buildCacheKey, normalizeKeyPart } from "@/lib/cache-keys";
+import { buildDatasetVersion } from "@/lib/dataset-version";
+import { resolvePendingPredictions } from "@/lib/prediction-ledger";
 import { downloadTemplate, parseRawTextMatches, parseWorkbook, readWorkbook, validateWorkbook, type ParsedImportData } from "@/lib/excel";
 import type { ImportSummary, MatchRecord, Odds1X2Record, OddsOuRecord, PlayerMapRecord, UpcomingRecord } from "@/lib/types";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { useAppStore } from "@/store/appStore";
 
 const steps = ["Upload", "Validar", "Limpar", "Concluir"];
 const RAW_IMPORT_DRAFT_KEY = "hubpessoal-raw-import-draft-v1";
@@ -35,6 +39,7 @@ function evaluateImportQuality(parsed: ParsedImportData): ImportQualityGate {
   let score = 100;
 
   const pairSet = new Set<string>();
+  const pairCounts = new Map<string, number>();
   const leagueSet = new Set<string>();
   let minTs = Number.POSITIVE_INFINITY;
   let maxTs = Number.NEGATIVE_INFINITY;
@@ -44,6 +49,7 @@ function evaluateImportQuality(parsed: ParsedImportData): ImportQualityGate {
     const away = item.awayNick.trim().toLowerCase();
     const pair = [home, away].sort().join("|");
     pairSet.add(pair);
+    pairCounts.set(pair, (pairCounts.get(pair) ?? 0) + 1);
     if (item.league) leagueSet.add(item.league);
     const timestamp = new Date(item.dateTime).getTime();
     if (!Number.isNaN(timestamp)) {
@@ -53,6 +59,17 @@ function evaluateImportQuality(parsed: ParsedImportData): ImportQualityGate {
   }
 
   const uniquePairRatio = sampleSize ? pairSet.size / sampleSize : 0;
+  const maxPairCount = [...pairCounts.values()].reduce((acc, value) => Math.max(acc, value), 0);
+  const maxPairShare = sampleSize ? maxPairCount / sampleSize : 0;
+  const effectiveMatchups = (() => {
+    if (!sampleSize) return 0;
+    let sumSquares = 0;
+    pairCounts.forEach((count) => {
+      const p = count / sampleSize;
+      sumSquares += p * p;
+    });
+    return sumSquares > 0 ? 1 / sumSquares : 0;
+  })();
   const leagueCount = leagueSet.size;
   const spanDays = Number.isFinite(minTs) && Number.isFinite(maxTs)
     ? Math.max(0, (maxTs - minTs) / (1000 * 60 * 60 * 24))
@@ -66,12 +83,22 @@ function evaluateImportQuality(parsed: ParsedImportData): ImportQualityGate {
     reasons.push("Amostra curta; maior variância esperada.");
   }
 
-  if (uniquePairRatio < 0.35) {
-    score -= 25;
-    blockers.push("Base muito concentrada em poucos confrontos.");
-  } else if (uniquePairRatio < 0.5) {
+  // Concentração de confrontos: repetição é normal (mesmos jogadores voltam a jogar),
+  // mas a base vira frágil quando pouquíssimos confrontos dominam.
+  if (pairSet.size <= 5 && sampleSize >= 40) {
+    score -= 30;
+    blockers.push(`Base com poucos confrontos únicos (${pairSet.size}).`);
+  } else if (maxPairShare >= 0.5 && sampleSize >= 40) {
+    score -= 30;
+    blockers.push(`Base concentrada: o confronto mais repetido representa ${(maxPairShare * 100).toFixed(0)}% dos jogos.`);
+  } else if (uniquePairRatio < 0.25 && sampleSize >= 40) {
+    score -= 18;
+    reasons.push(
+      `Diversidade baixa: ${pairSet.size} confrontos únicos em ${sampleSize} jogos (top ${(maxPairShare * 100).toFixed(0)}%).`
+    );
+  } else if (maxPairShare > 0.3 && sampleSize >= 40) {
     score -= 10;
-    reasons.push("Diversidade de confrontos abaixo do ideal.");
+    reasons.push(`Concentração moderada: top confronto ${(maxPairShare * 100).toFixed(0)}% (matchups efetivos ${effectiveMatchups.toFixed(1)}).`);
   }
 
   if (spanDays < 7) {
@@ -142,8 +169,19 @@ function mergeByKey<T>(base: T[], incoming: T[], getKey: (item: T) => string) {
   return [...map.values()];
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function hasDatasetVersion(payload: unknown, datasetVersion: string) {
+  if (!isObjectRecord(payload)) return false;
+  const value = payload.datasetVersion;
+  return typeof value === "string" && value === datasetVersion;
+}
+
 export default function ImportPage() {
   const router = useRouter();
+  const bumpDataRevision = useAppStore((state) => state.bumpDataRevision);
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
@@ -211,6 +249,8 @@ export default function ImportPage() {
       minDate: validDates[0]?.toISOString(),
       maxDate: validDates[validDates.length - 1]?.toISOString(),
     };
+    const datasetVersion = buildDatasetVersion(mergedMatches);
+    mergedImportSummary.datasetVersion = datasetVersion;
 
     const importedAt = new Date().toISOString();
     const dashboardCache = buildDashboardData({
@@ -222,7 +262,17 @@ export default function ImportPage() {
       decisionMode: "conservador",
       recencyFactor: parsed.config.recencyFactor,
       shrinkK: parsed.config.shrinkK,
+      minGamesConfidence: parsed.config.minGamesConfidence ?? null,
     });
+    const configWithDatasetVersion = {
+      ...parsed.config,
+      datasetVersion,
+    };
+    const presetId = "default";
+    const market = "ou-6.5";
+    const evalCacheKey = buildCacheKey("eval", datasetVersion, presetId, market, "all");
+    const calibCacheKey = buildCacheKey("calib", datasetVersion, presetId, market, "all");
+    const decisionCacheKey = buildCacheKey("decision", datasetVersion, presetId, market, "all");
 
     const beforeCounts = await Promise.all([
       db.matches.count(),
@@ -243,17 +293,20 @@ export default function ImportPage() {
         await db.config.clear();
         await db.players.clear();
         await db.rawDatasets.clear();
+        await db.computedCache.clear();
 
         await db.matches.bulkPut(mergedMatches);
         if (mergedUpcoming.length) await db.upcoming.bulkPut(mergedUpcoming);
         if (mergedOdds1x2.length) await db.odds1x2.bulkPut(mergedOdds1x2);
         if (mergedOddsOu.length) await db.oddsOu.bulkPut(mergedOddsOu);
-        await db.config.add(parsed.config);
+        await db.config.add(configWithDatasetVersion);
         if (mergedPlayers.length) await db.players.bulkPut(mergedPlayers);
 
         await db.rawDatasets.add({
           id: "latest",
+          datasetVersion,
           ...parsed,
+          config: configWithDatasetVersion,
           matches: mergedMatches,
           upcoming: mergedUpcoming,
           odds1x2: mergedOdds1x2,
@@ -268,6 +321,48 @@ export default function ImportPage() {
           importedAt,
           payload: dashboardCache,
         });
+
+        await db.computedCache.bulkPut([
+          {
+            key: evalCacheKey,
+            importedAt,
+            payload: {
+              datasetVersion,
+              league: "all",
+              market,
+              presetId,
+              metrics: {
+                accuracy: dashboardCache.backtest.accuracy ?? 0,
+                brierScore: dashboardCache.backtest.brierScore ?? 0,
+                logLoss: dashboardCache.backtest.logLoss ?? 0,
+                reliabilityBins: dashboardCache.backtest.reliabilityBins ?? [],
+              },
+              backtest: dashboardCache.backtest,
+            },
+          },
+          {
+            key: calibCacheKey,
+            importedAt,
+            payload: {
+              datasetVersion,
+              league: "all",
+              market,
+              presetId,
+              calibration: dashboardCache.calibration,
+            },
+          },
+          {
+            key: decisionCacheKey,
+            importedAt,
+            payload: {
+              datasetVersion,
+              league: "all",
+              market,
+              presetId,
+              decision: dashboardCache.decision,
+            },
+          },
+        ]);
       }
     );
 
@@ -299,12 +394,48 @@ export default function ImportPage() {
       );
     }
 
+    const expectedKeys = ["latest", evalCacheKey, calibCacheKey, decisionCacheKey];
+    const expectedNormalizedDatasetVersion = normalizeKeyPart(datasetVersion);
+    const computedRows = await db.computedCache.toArray();
+    const foundKeySet = new Set(computedRows.map((item) => item.key));
+
+    const missingKeys = expectedKeys.filter((key) => !foundKeySet.has(key));
+    if (missingKeys.length) {
+      throw new Error(`Falha de consistência no computedCache: chaves ausentes (${missingKeys.join(", ")}).`);
+    }
+
+    const versionedRows = computedRows.filter((item) => item.key.startsWith("v1:"));
+    const invalidKeyVersion = versionedRows.some((item) => !item.key.includes(`:${expectedNormalizedDatasetVersion}:`));
+    if (invalidKeyVersion) {
+      throw new Error("Falha de consistência no computedCache: chave versionada divergente do datasetVersion atual.");
+    }
+
+    const evalRow = computedRows.find((item) => item.key === evalCacheKey);
+    const calibRow = computedRows.find((item) => item.key === calibCacheKey);
+    const decisionRow = computedRows.find((item) => item.key === decisionCacheKey);
+
+    if (!evalRow || !calibRow || !decisionRow) {
+      throw new Error("Falha de consistência no computedCache: registros analíticos não encontrados.");
+    }
+
+    const payloadsAreVersioned = [evalRow.payload, calibRow.payload, decisionRow.payload].every((payload) =>
+      hasDatasetVersion(payload, datasetVersion)
+    );
+
+    if (!payloadsAreVersioned) {
+      throw new Error("Falha de consistência no computedCache: payload sem datasetVersion compatível.");
+    }
+
+    const ledgerResolution = await resolvePendingPredictions();
+
     return {
       totalMatches: mergedMatches.length,
       importSummary: mergedImportSummary,
       audit: {
         beforeMatches: beforeCounts[0],
         afterMatches: afterCounts[0],
+        ledgerResolved: ledgerResolution.resolved,
+        ledgerOpen: ledgerResolution.open,
       },
     };
   };
@@ -338,6 +469,7 @@ export default function ImportPage() {
           ? `Importação concluída com alerta de qualidade (${gate.score}/100). Base substituída: ${persisted.audit.beforeMatches} → ${persisted.audit.afterMatches} jogos.`
           : `Importação concluída. Base substituída: ${persisted.audit.beforeMatches} → ${persisted.audit.afterMatches} jogos.`
       );
+      bumpDataRevision();
       setTimeout(() => router.push("/dashboard"), 900);
     } catch {
       setMessage("Falha ao importar o arquivo.");
@@ -376,6 +508,7 @@ export default function ImportPage() {
       setSummary(null);
       setStep(1);
       setMessage(`Base local limpa com sucesso: ${beforeMatches} → ${afterMatches} jogos.`);
+      bumpDataRevision();
     } catch {
       setMessage("Falha ao limpar a base local.");
     } finally {
@@ -412,6 +545,8 @@ export default function ImportPage() {
           ? `Importação por texto concluída com alerta de qualidade (${gate.score}/100). Base substituída: ${persisted.audit.beforeMatches} → ${persisted.audit.afterMatches} jogos.`
           : `Importação por texto concluída. Base substituída: ${persisted.audit.beforeMatches} → ${persisted.audit.afterMatches} jogos.`
       );
+      bumpDataRevision();
+      setTimeout(() => router.push("/dashboard"), 900);
     } catch {
       setMessage("Falha ao importar texto bruto.");
     } finally {

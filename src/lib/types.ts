@@ -2,6 +2,10 @@ export type Confidence = "baixa" | "media" | "alta";
 
 export type DecisionMode = "conservador" | "agressivo";
 
+export type RecommendationStatus = "APOSTAVEL" | "CAUTELA" | "EVITAR" | "SEM_SINAL";
+
+export type ConfidenceUpper = "ALTA" | "MEDIA" | "BAIXA";
+
 export type RateInterval = {
   rate: number;
   low: number;
@@ -23,6 +27,7 @@ export type ImportSummary = {
   leaguesDetected: string[];
   minDate?: string;
   maxDate?: string;
+  datasetVersion?: string | null;
 };
 
 export type MatchRecord = {
@@ -91,6 +96,7 @@ export type ConfigRecord = {
   shrinkK: number;
   simulations: number;
   minGamesConfidence: number;
+  datasetVersion?: string | null;
 };
 
 export type PlayerMapRecord = {
@@ -164,6 +170,10 @@ export type BacktestSummary = {
   attempts: number;
   hits: number;
   hitRate: number;
+  accuracy?: number;
+  brierScore?: number;
+  logLoss?: number;
+  reliabilityBins?: ReliabilityBin[];
   baselineRandomHitRate: number;
   baselineLeagueHitRate: number;
   baselineOddsHitRate: number;
@@ -186,8 +196,19 @@ export type CalibrationBin = {
   count: number;
 };
 
+export type ReliabilityBin = CalibrationBin;
+
 export type CalibrationSummary = {
+  market?: string;
+  league?: string;
+  method?: "isotonic" | "platt" | "identity";
+  sampleSize?: number;
+  currentRaw?: number;
+  currentCalibrated?: number;
+  brierRaw?: number;
   brierScore: number;
+  logLossRaw?: number;
+  logLoss?: number;
   byBin: CalibrationBin[];
 };
 
@@ -224,16 +245,80 @@ export type DecisionSummary = {
   mode: DecisionMode;
   score: number;
   signal: "over" | "under" | "neutro";
+  recommendation: RecommendationStatus;
   confidence: Confidence;
   semaphore: "verde" | "amarelo" | "vermelho";
   antiFalseSignalPassed: boolean;
   isBettable: boolean;
+  gateConfidencePassed?: boolean;
+  gateDriftPassed?: boolean;
+  gateEdgePassed?: boolean;
+  gateIcPassed?: boolean;
+  gateReliabilityPassed?: boolean;
+  reliabilityScore?: number;
   adaptiveEdgeThreshold: number;
   edgeVsNeutral: number;
+  probabilityRaw?: number;
+  probabilityCalibrated?: number;
   entryCondition: string;
   abortCondition: string;
   reasons: string[];
   contrarianReasons: string[];
+};
+
+export type PredictionOutcome = {
+  homeGoals: number;
+  awayGoals: number;
+  result1x2: "home" | "draw" | "away";
+  overByLine: Record<string, boolean>;
+  btts: boolean;
+};
+
+export type PredictionLedgerRecord = {
+  id: string;
+  createdAt: string;
+  resolvedAt?: string | null;
+  datasetVersion?: string | null;
+  modelVersion: string;
+  presetId: string;
+  routeContext: "dashboard" | "h2h" | "aovivo";
+  matchKey: string;
+  league?: string;
+  market: string;
+  pRaw: number;
+  pCalibrated: number;
+  decision: RecommendationStatus;
+  confidence: ConfidenceUpper;
+  reasons: string[];
+  contraReasons: string[];
+  inputSnapshot?: unknown;
+  outcome?: PredictionOutcome | null;
+  isCollectReliable?: boolean | null;
+  reliabilityScore?: number | null;
+};
+
+export type AliasRecord = {
+  id: string;
+  nickOriginal: string;
+  nickCanonico: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WatchlistRecord = {
+  id: string;
+  kind: "nick" | "league";
+  value: string;
+  createdAt: string;
+};
+
+export type PerformanceSummary = {
+  total: number;
+  resolved: number;
+  unresolved: number;
+  hitRate: number;
+  brier: number;
+  byDecision: Record<RecommendationStatus, number>;
 };
 
 export type DashboardData = {

@@ -21,6 +21,7 @@ type AppState = {
   sidebarOpen: boolean;
   commandPaletteOpen: boolean;
   currentDatasetMeta: DatasetMeta;
+  dataRevision: number;
   league: string;
   period: PeriodFilter;
   recencyOn: boolean;
@@ -34,6 +35,7 @@ type AppState = {
   setSidebarOpen: (open: boolean) => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setDatasetMeta: (meta: Partial<DatasetMeta>) => void;
+  bumpDataRevision: () => void;
   setLeague: (league: string) => void;
   setPeriod: (period: PeriodFilter) => void;
   setRecencyOn: (value: boolean) => void;
@@ -58,6 +60,7 @@ export const useAppStore = create<AppState>()(
       sidebarOpen: false,
       commandPaletteOpen: false,
       currentDatasetMeta: initialMeta,
+      dataRevision: 0,
       league: "all",
       period: "all",
       recencyOn: true,
@@ -77,6 +80,7 @@ export const useAppStore = create<AppState>()(
             ...meta,
           },
         })),
+      bumpDataRevision: () => set((state) => ({ dataRevision: state.dataRevision + 1 })),
       setLeague: (league) => set({ league }),
       setPeriod: (period) => set({ period }),
       setRecencyOn: (recencyOn) => set({ recencyOn }),
