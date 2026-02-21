@@ -9,6 +9,7 @@ import { getSeedMatches } from "@/lib/seed";
 import type { MatchRecord } from "@/lib/types";
 import { useAppStore } from "@/store/appStore";
 import { computeSessionFromHistory, computeStyleFromHistory, computeTiltFromHistory, summarizeTeamAffinity } from "@/lib/derived-signals";
+import { inferMostRecentTeam, lastMatchesWithTeam } from "@/lib/team-history";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -46,6 +47,12 @@ export default function PlayerPage() {
         .sort((a, b) => +new Date(b.dateTime) - +new Date(a.dateTime))
         .slice(0, 5),
     [matches, nick]
+  );
+
+  const mostRecentTeam = useMemo(() => inferMostRecentTeam(matches, nick), [matches, nick]);
+  const lastSameTeamGames = useMemo(
+    () => (mostRecentTeam ? lastMatchesWithTeam(matches, nick, mostRecentTeam, 5) : []),
+    [matches, nick, mostRecentTeam]
   );
 
   const favoriteLine = useMemo(() => {
@@ -128,6 +135,29 @@ export default function PlayerPage() {
       <Card className="col-4"><CardHeader><div><h3>Comparação vs Liga</h3><small>Diferença por métrica</small></div></CardHeader><CardBody><div className="list"><div className="row"><span>PPG</span><b>{(player.ppgFinal - (dashboard.rankings.topBest[0]?.ppgFinal ?? 0)).toFixed(2)}</b></div><div className="row"><span>BTTS</span><b>{((player.bttsRate - dashboard.bttsRate) * 100).toFixed(1)} pp</b></div><div className="row"><span>IC95% BTTS</span><b>{(player.bttsInterval.low * 100).toFixed(1)}%–{(player.bttsInterval.high * 100).toFixed(1)}%</b></div><div className="row"><span>Linha favorita</span><b>{favoriteLine?.line ?? "-"}</b></div></div></CardBody></Card>
 
       <Card className="col-6"><CardHeader><div><h3>Últimos 5 jogos</h3><small>Recorte recente</small></div></CardHeader><CardBody><div className="list">{recentGames.map((match) => <div key={match.id} className="row"><div className="left"><div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><PlayerAvatar nick={match.homeNick} size={24} radius={10} /><PlayerAvatar nick={match.awayNick} size={24} radius={10} /></div><div className="nick"><b>{match.homeNick} {match.homeGoals} x {match.awayGoals} {match.awayNick}</b><small>{new Date(match.dateTime).toLocaleString("pt-BR")}</small></div></div></div>)}</div></CardBody></Card>
+
+      <Card className="col-6"><CardHeader><div><h3>Últimos 5 com o mesmo time</h3><small>{mostRecentTeam ? `Time: ${mostRecentTeam}` : "Time não identificado"}</small></div></CardHeader><CardBody>
+        {!mostRecentTeam || !lastSameTeamGames.length ? (
+          <div className="empty">Sem jogos suficientes com o mesmo time.</div>
+        ) : (
+          <div className="list">
+            {lastSameTeamGames.map((match) => (
+              <div key={match.id} className="row">
+                <div className="left">
+                  <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    <PlayerAvatar nick={match.homeNick} size={24} radius={10} />
+                    <PlayerAvatar nick={match.awayNick} size={24} radius={10} />
+                  </div>
+                  <div className="nick">
+                    <b>{match.homeNick} {match.homeGoals} x {match.awayGoals} {match.awayNick}</b>
+                    <small>{match.homeNick.toLowerCase() === nick.toLowerCase() ? match.homeTeam : match.awayTeam} • {new Date(match.dateTime).toLocaleString("pt-BR")}</small>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardBody></Card>
 
       <Card className="col-6"><CardHeader><div><h3>Insights explicáveis</h3><small>Sem IA, regras determinísticas</small></div></CardHeader><CardBody><div className="list"><div className="row"><span>Linha favorita</span><b>{favoriteLine ? `${favoriteLine.line} (${(favoriteLine.diff * 100).toFixed(1)} pp vs liga)` : "-"}</b></div><div className="row"><span>Tendência recente</span><b>{trend ?? "Sem amostra"}</b></div><div className="row"><span>Força da evidência</span><b>{player.effectiveGames >= 10 ? "Robusta" : player.effectiveGames >= 5 ? "Moderada" : "Frágil"}</b></div></div></CardBody></Card>
 

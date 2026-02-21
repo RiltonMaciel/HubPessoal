@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { v4 as uuidv4 } from "uuid";
 import { db } from "@/lib/db";
 import type { NoteRecord, NoteType } from "@/lib/types";
@@ -13,6 +14,8 @@ import { Select } from "@/components/ui/Select";
 const noteTypes: NoteType[] = ["Anotação", "Objetivo", "Ideia", "Checklist"];
 
 export default function NotesPage() {
+  const router = useRouter();
+  const [urlQuery, setUrlQuery] = useState("");
   const [notes, setNotes] = useState<NoteRecord[]>([]);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -20,12 +23,32 @@ export default function NotesPage() {
   const [type, setType] = useState<NoteType>("Anotação");
   const [filterType, setFilterType] = useState<"all" | NoteType>("all");
   const [selectedTag, setSelectedTag] = useState<string>("all");
+  const [textFilter, setTextFilter] = useState("");
 
   const reload = async () => setNotes(await db.notes.orderBy("updatedAt").reverse().toArray());
 
   useEffect(() => {
     void reload();
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    setUrlQuery((params.get("q") ?? "").trim());
+  }, []);
+
+  useEffect(() => {
+    setTextFilter(urlQuery);
+  }, [urlQuery]);
+
+  const applyTextFilterToUrl = (next: string) => {
+    const value = next.trim();
+    const params = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
+    if (!value) params.delete("q");
+    else params.set("q", value);
+    const qs = params.toString();
+    router.replace(qs ? `/notes?${qs}` : "/notes");
+  };
 
   const save = async () => {
     if (!title.trim()) return;
@@ -49,12 +72,17 @@ export default function NotesPage() {
   };
 
   const list = useMemo(() => {
+    const q = textFilter.trim().toLowerCase();
     return notes.filter((note) => {
       if (filterType !== "all" && note.type !== filterType) return false;
       if (selectedTag !== "all" && !note.tags.includes(selectedTag)) return false;
+      if (q) {
+        const hay = `${note.title}\n${note.content}\n${note.tags.join(" ")}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
       return true;
     });
-  }, [notes, filterType, selectedTag]);
+  }, [notes, filterType, selectedTag, textFilter]);
 
   const tagsList = useMemo(() => ["all", ...new Set(notes.flatMap((item) => item.tags))], [notes]);
 
@@ -77,6 +105,16 @@ export default function NotesPage() {
         </CardHeader>
         <CardBody>
           <div className="list">
+            <input
+              className="select"
+              placeholder="Buscar (título, conteúdo, tags)"
+              value={textFilter}
+              onChange={(event) => setTextFilter(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") applyTextFilterToUrl(textFilter);
+                if (event.key === "Escape") applyTextFilterToUrl("");
+              }}
+            />
             <Select value={filterType} onChange={(event) => setFilterType(event.target.value as "all" | NoteType)}>
               <option value="all">Todos os tipos</option>
               {noteTypes.map((item) => <option key={item} value={item}>{item}</option>)}
@@ -87,6 +125,7 @@ export default function NotesPage() {
             <div className="chips">
               <Badge>Fixadas: {notes.filter((item) => item.pinned).length}</Badge>
               <Badge>Total: {notes.length}</Badge>
+              {urlQuery ? <Badge tone="good">Busca: {urlQuery}</Badge> : null}
             </div>
           </div>
         </CardBody>

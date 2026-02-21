@@ -834,6 +834,64 @@ export default function AoVivoPage() {
     [rows]
   );
 
+  const coverage = useMemo(() => {
+    const total = queueRows.length;
+    if (!total) {
+      return {
+        total: 0,
+        coveredBoth: 0,
+        coverageScore: 0,
+        minGamesAvg: 0,
+        level: "critical" as const,
+        reasons: ["Sem linhas na fila para validar cobertura."],
+      };
+    }
+
+    let coveredBoth = 0;
+    let minGamesSum = 0;
+
+    for (const row of queueRows) {
+      const homeKey = normalizeNick(row.homeNick ?? row.homeTeam);
+      const awayKey = normalizeNick(row.awayNick ?? row.awayTeam);
+      const homeGames = strengths.get(homeKey)?.games ?? 0;
+      const awayGames = strengths.get(awayKey)?.games ?? 0;
+      const minGames = Math.min(homeGames, awayGames);
+      minGamesSum += minGames;
+      if (minGames >= 8) coveredBoth += 1;
+    }
+
+    const ratio = coveredBoth / total;
+    const coverageScore = Math.round(ratio * 100);
+    const minGamesAvg = minGamesSum / total;
+    const level = coverageScore >= 70 ? ("ok" as const) : coverageScore >= 45 ? ("warn" as const) : ("critical" as const);
+    const reasons: string[] = [];
+    reasons.push(`Cobertura (n>=8 em ambos): ${coveredBoth}/${total} (${(ratio * 100).toFixed(0)}%).`);
+    reasons.push(`Amostra mínima média (min(home/away)): ${minGamesAvg.toFixed(1)} jogos.`);
+    if (coverageScore < 45) {
+      reasons.push("Cobertura baixa: muitos nicks do board não existem (ou têm pouca amostra) no histórico importado.");
+    } else if (coverageScore < 70) {
+      reasons.push("Cobertura moderada: rebaixar agressividade e evitar sinais fortes sem auditoria.");
+    }
+
+    return { total, coveredBoth, coverageScore, minGamesAvg, level, reasons };
+  }, [queueRows, strengths]);
+
+  const finalReliabilityScore = useMemo(() => {
+    const base = reliabilityScore ?? 0;
+    if (!queueRows.length) return base;
+
+    // Confiabilidade final combina saúde da coleta (API) + cobertura na base (local).
+    // Mantém comportamento conservador: coverage baixa penaliza mais.
+    const coveragePenalty = coverage.coverageScore >= 70 ? 0 : coverage.coverageScore >= 45 ? 12 : 25;
+    return clamp(base - coveragePenalty, 0, 100);
+  }, [reliabilityScore, coverage.coverageScore, queueRows.length]);
+
+  const finalIsCollectReliable = useMemo(() => {
+    const baseGate = isCollectReliable ?? true;
+    const coverageGate = coverage.coverageScore >= 60;
+    return baseGate && coverageGate;
+  }, [isCollectReliable, coverage.coverageScore]);
+
   const boardWithProb = useMemo(
     () => queueRows.map((row) => {
       const prob = estimateWinnerProbability(row, strengths, leaguePpg);
@@ -855,8 +913,8 @@ export default function AoVivoPage() {
         adaptiveEdgeThreshold: 0.06,
         probabilityRaw: favoriteRaw,
         probabilityCalibrated: favoriteCalibrated,
-        reliabilityScore,
-        isCollectReliable,
+        reliabilityScore: finalReliabilityScore,
+        isCollectReliable: finalIsCollectReliable,
         antiFalseSignalPassed: favoriteCalibrated >= 0.5 && prob.favorite !== "draw",
       });
 
@@ -868,7 +926,7 @@ export default function AoVivoPage() {
         recommendation: decision,
       };
     }),
-    [queueRows, strengths, leaguePpg, favoriteCalibration.model, driftLevel, reliabilityScore, isCollectReliable]
+    [queueRows, strengths, leaguePpg, favoriteCalibration.model, driftLevel, finalReliabilityScore, finalIsCollectReliable]
   );
 
   const boardTotalPages = useMemo(
@@ -949,8 +1007,8 @@ export default function AoVivoPage() {
       adaptiveEdgeThreshold: 0.06,
       probabilityRaw: favoriteRaw,
       probabilityCalibrated: favoriteCalibrated,
-      reliabilityScore,
-      isCollectReliable,
+      reliabilityScore: finalReliabilityScore,
+      isCollectReliable: finalIsCollectReliable,
       antiFalseSignalPassed: favoriteCalibrated >= 0.5 && base.winner.favorite !== "draw",
     });
 
@@ -980,7 +1038,7 @@ export default function AoVivoPage() {
       favoriteCalibrated,
       contextSignals,
     };
-  }, [selectedRow, aliasedMatches, strengths, leaguePpg, lightMode, favoriteCalibration.model, driftLevel, reliabilityScore, isCollectReliable, derivedIndex]);
+  }, [selectedRow, aliasedMatches, strengths, leaguePpg, lightMode, favoriteCalibration.model, driftLevel, finalReliabilityScore, finalIsCollectReliable, derivedIndex]);
 
   useEffect(() => {
     if (!datasetVersion || !boardWithProb.length) return;
@@ -1010,10 +1068,10 @@ export default function AoVivoPage() {
         score: target.row.score,
         favorite: target.prob.favorite,
       },
-      reliabilityScore,
-      isCollectReliable,
+      reliabilityScore: finalReliabilityScore,
+      isCollectReliable: finalIsCollectReliable,
     });
-  }, [datasetVersion, boardWithProb, reliabilityScore, isCollectReliable]);
+  }, [datasetVersion, boardWithProb, finalReliabilityScore, finalIsCollectReliable]);
 
   const isFresh = useMemo(() => {
     if (!lastSuccessAt) return false;
@@ -1165,8 +1223,14 @@ export default function AoVivoPage() {
             <Badge tone={(reliabilityScore ?? 0) >= 70 ? "good" : (reliabilityScore ?? 0) >= 55 ? "warn" : "bad"}>
               {`Confiabilidade coleta: ${(reliabilityScore ?? 0).toFixed(0)}/100`} <InfoHint text={HELP.reliability} />
             </Badge>
-            <Badge tone={isCollectReliable === false ? "bad" : "good"}>
-              {`Gate coleta: ${isCollectReliable === false ? "REBAIXADA" : "OK"}`} <InfoHint text={HELP.gate} />
+            <Badge tone={coverage.level === "ok" ? "good" : coverage.level === "warn" ? "warn" : "bad"}>
+              {`Cobertura base: ${coverage.coverageScore}/100`} <InfoHint text={coverage.reasons.join("\n")} />
+            </Badge>
+            <Badge tone={finalReliabilityScore >= 70 ? "good" : finalReliabilityScore >= 55 ? "warn" : "bad"}>
+              {`Confiabilidade final: ${finalReliabilityScore.toFixed(0)}/100`}
+            </Badge>
+            <Badge tone={finalIsCollectReliable === false ? "bad" : "good"}>
+              {`Gate coleta: ${finalIsCollectReliable === false ? "REBAIXADA" : "OK"}`} <InfoHint text={HELP.gate} />
             </Badge>
             <Badge>{`Fav raw/cal: ${(favoriteCalibration.summary.currentRaw ?? 0).toFixed(0)} / ${(favoriteCalibration.summary.currentCalibrated ?? 0).toFixed(0)}`} <InfoHint text={HELP.calibration} /></Badge>
             <Badge>{`Calibração ${favoriteCalibration.summary.method ?? "identity"} • Brier ${(favoriteCalibration.summary.brierScore ?? 0).toFixed(3)}`} <InfoHint text={HELP.calibration} /></Badge>
@@ -1182,6 +1246,9 @@ export default function AoVivoPage() {
               <Badge key={bin.label}>{`Rel ${bin.label} n=${bin.count} • prev ${(bin.predicted * 100).toFixed(0)}% vs obs ${(bin.observed * 100).toFixed(0)}%`}</Badge>
             ))}
             {reliabilityReasons.slice(0, 2).map((reason) => (
+              <Badge key={reason}>{reason}</Badge>
+            ))}
+            {coverage.reasons.slice(0, 1).map((reason) => (
               <Badge key={reason}>{reason}</Badge>
             ))}
           </div>

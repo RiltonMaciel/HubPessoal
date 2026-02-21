@@ -21,6 +21,7 @@ import { Table } from "@/components/ui/Table";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useAppStore } from "@/store/appStore";
 import { buildDerivedSignalIndex, computeDerivedSignals, summarizeTeamAffinity } from "@/lib/derived-signals";
+import { inferMostRecentTeam, lastMatchesWithTeam } from "@/lib/team-history";
 
 const lines = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
 const lastNOptions = ["5", "10", "20", "all"] as const;
@@ -688,6 +689,28 @@ export default function HeadToHeadPage() {
 
   const topTeamsA = useMemo(() => summarizeTeamAffinity({ nick: playerA, history: playerAHistory, ouLine: line, minGamesPerTeam: 4, topN: 3 }), [playerA, playerAHistory, line]);
   const topTeamsB = useMemo(() => summarizeTeamAffinity({ nick: playerB, history: playerBHistory, ouLine: line, minGamesPerTeam: 4, topN: 3 }), [playerB, playerBHistory, line]);
+
+  const teamLabelA = useMemo(() => {
+    if (!contextEnabled) return null;
+    const raw = teamA.trim();
+    return raw ? raw : inferMostRecentTeam(allMatches, playerA);
+  }, [contextEnabled, teamA, allMatches, playerA]);
+
+  const teamLabelB = useMemo(() => {
+    if (!contextEnabled) return null;
+    const raw = teamB.trim();
+    return raw ? raw : inferMostRecentTeam(allMatches, playerB);
+  }, [contextEnabled, teamB, allMatches, playerB]);
+
+  const lastSameTeamA = useMemo(() => {
+    if (!contextEnabled || !teamLabelA) return [] as MatchRecord[];
+    return lastMatchesWithTeam(allMatches, playerA, teamLabelA, 5);
+  }, [contextEnabled, allMatches, playerA, teamLabelA]);
+
+  const lastSameTeamB = useMemo(() => {
+    if (!contextEnabled || !teamLabelB) return [] as MatchRecord[];
+    return lastMatchesWithTeam(allMatches, playerB, teamLabelB, 5);
+  }, [contextEnabled, allMatches, playerB, teamLabelB]);
 
   const nickIndex = useMemo(() => buildNickIndex(allMatches), [allMatches]);
 
@@ -1473,6 +1496,72 @@ export default function HeadToHeadPage() {
               </div>
               <p style={{ marginTop: 0, marginBottom: 8, fontWeight: 700 }}>{quickTip}</p>
               <p className="mini" style={{ margin: 0 }}>{recommendation}</p>
+            </CardBody>
+          </Card>
+
+          <Card className="col-6">
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Últimos 5 com o mesmo time ({playerA})</h3>
+                <small>
+                  {teamLabelA ? `Time: ${teamLabelA}${teamA.trim() ? " (filtro)" : " (inferido)"}` : "Time não identificado"}
+                </small>
+              </div>
+            </CardHeader>
+            <CardBody>
+              {!teamLabelA || !lastSameTeamA.length ? (
+                <EmptyState title="Sem dados" subtitle="Não há jogos suficientes desse nick com o time atual." />
+              ) : (
+                <div className="list">
+                  {lastSameTeamA.map((m) => (
+                    <div key={m.id} className="row">
+                      <div className="left">
+                        <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <PlayerAvatar nick={m.homeNick} size={24} radius={10} />
+                          <PlayerAvatar nick={m.awayNick} size={24} radius={10} />
+                        </div>
+                        <div className="nick">
+                          <b>{m.homeNick} {m.homeGoals} x {m.awayGoals} {m.awayNick}</b>
+                          <small>{formatDateTimePtBr(m.dateTime)} • {m.homeNick.toLowerCase() === playerA.toLowerCase() ? m.homeTeam : m.awayTeam}</small>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
+          <Card className="col-6">
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Últimos 5 com o mesmo time ({playerB})</h3>
+                <small>
+                  {teamLabelB ? `Time: ${teamLabelB}${teamB.trim() ? " (filtro)" : " (inferido)"}` : "Time não identificado"}
+                </small>
+              </div>
+            </CardHeader>
+            <CardBody>
+              {!teamLabelB || !lastSameTeamB.length ? (
+                <EmptyState title="Sem dados" subtitle="Não há jogos suficientes desse nick com o time atual." />
+              ) : (
+                <div className="list">
+                  {lastSameTeamB.map((m) => (
+                    <div key={m.id} className="row">
+                      <div className="left">
+                        <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <PlayerAvatar nick={m.homeNick} size={24} radius={10} />
+                          <PlayerAvatar nick={m.awayNick} size={24} radius={10} />
+                        </div>
+                        <div className="nick">
+                          <b>{m.homeNick} {m.homeGoals} x {m.awayGoals} {m.awayNick}</b>
+                          <small>{formatDateTimePtBr(m.dateTime)} • {m.homeNick.toLowerCase() === playerB.toLowerCase() ? m.homeTeam : m.awayTeam}</small>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardBody>
           </Card>
 

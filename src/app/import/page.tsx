@@ -269,10 +269,75 @@ export default function ImportPage() {
       datasetVersion,
     };
     const presetId = "default";
-    const market = "ou-6.5";
-    const evalCacheKey = buildCacheKey("eval", datasetVersion, presetId, market, "all");
-    const calibCacheKey = buildCacheKey("calib", datasetVersion, presetId, market, "all");
-    const decisionCacheKey = buildCacheKey("decision", datasetVersion, presetId, market, "all");
+    const linesToCache = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
+    const leaguesToCache = Array.from(
+      new Set(["all", ...mergedImportSummary.leaguesDetected].filter(Boolean))
+    ).slice(0, 12);
+
+    const cacheRows: Array<{ key: string; importedAt: string; payload: unknown }> = [];
+    for (const leagueName of leaguesToCache) {
+      for (const lineRef of linesToCache) {
+        const market = `ou${lineRef}`;
+        const dashboardForCache = buildDashboardData({
+          matches: mergedMatches,
+          league: leagueName,
+          period: "all",
+          recencyOn: true,
+          line: lineRef,
+          decisionMode: "conservador",
+          recencyFactor: parsed.config.recencyFactor,
+          shrinkK: parsed.config.shrinkK,
+          minGamesConfidence: parsed.config.minGamesConfidence ?? null,
+        });
+
+        cacheRows.push({
+          key: buildCacheKey("eval", datasetVersion, presetId, market, leagueName),
+          importedAt,
+          payload: {
+            datasetVersion,
+            league: leagueName,
+            market,
+            presetId,
+            metrics: {
+              accuracy: dashboardForCache.backtest.accuracy ?? 0,
+              brierScore: dashboardForCache.backtest.brierScore ?? 0,
+              logLoss: dashboardForCache.backtest.logLoss ?? 0,
+              reliabilityBins: dashboardForCache.backtest.reliabilityBins ?? [],
+            },
+            backtest: dashboardForCache.backtest,
+          },
+        });
+
+        cacheRows.push({
+          key: buildCacheKey("calib", datasetVersion, presetId, market, leagueName),
+          importedAt,
+          payload: {
+            datasetVersion,
+            league: leagueName,
+            market,
+            presetId,
+            calibration: dashboardForCache.calibration,
+          },
+        });
+
+        cacheRows.push({
+          key: buildCacheKey("decision", datasetVersion, presetId, market, leagueName),
+          importedAt,
+          payload: {
+            datasetVersion,
+            league: leagueName,
+            market,
+            presetId,
+            decision: dashboardForCache.decision,
+          },
+        });
+      }
+    }
+
+    const primaryMarket = "ou6.5";
+    const primaryEvalCacheKey = buildCacheKey("eval", datasetVersion, presetId, primaryMarket, "all");
+    const primaryCalibCacheKey = buildCacheKey("calib", datasetVersion, presetId, primaryMarket, "all");
+    const primaryDecisionCacheKey = buildCacheKey("decision", datasetVersion, presetId, primaryMarket, "all");
 
     const beforeCounts = await Promise.all([
       db.matches.count(),
@@ -322,47 +387,9 @@ export default function ImportPage() {
           payload: dashboardCache,
         });
 
-        await db.computedCache.bulkPut([
-          {
-            key: evalCacheKey,
-            importedAt,
-            payload: {
-              datasetVersion,
-              league: "all",
-              market,
-              presetId,
-              metrics: {
-                accuracy: dashboardCache.backtest.accuracy ?? 0,
-                brierScore: dashboardCache.backtest.brierScore ?? 0,
-                logLoss: dashboardCache.backtest.logLoss ?? 0,
-                reliabilityBins: dashboardCache.backtest.reliabilityBins ?? [],
-              },
-              backtest: dashboardCache.backtest,
-            },
-          },
-          {
-            key: calibCacheKey,
-            importedAt,
-            payload: {
-              datasetVersion,
-              league: "all",
-              market,
-              presetId,
-              calibration: dashboardCache.calibration,
-            },
-          },
-          {
-            key: decisionCacheKey,
-            importedAt,
-            payload: {
-              datasetVersion,
-              league: "all",
-              market,
-              presetId,
-              decision: dashboardCache.decision,
-            },
-          },
-        ]);
+        if (cacheRows.length) {
+          await db.computedCache.bulkPut(cacheRows);
+        }
       }
     );
 
@@ -394,7 +421,7 @@ export default function ImportPage() {
       );
     }
 
-    const expectedKeys = ["latest", evalCacheKey, calibCacheKey, decisionCacheKey];
+    const expectedKeys = ["latest", primaryEvalCacheKey, primaryCalibCacheKey, primaryDecisionCacheKey, ...cacheRows.map((item) => item.key)];
     const expectedNormalizedDatasetVersion = normalizeKeyPart(datasetVersion);
     const computedRows = await db.computedCache.toArray();
     const foundKeySet = new Set(computedRows.map((item) => item.key));
@@ -410,9 +437,9 @@ export default function ImportPage() {
       throw new Error("Falha de consistência no computedCache: chave versionada divergente do datasetVersion atual.");
     }
 
-    const evalRow = computedRows.find((item) => item.key === evalCacheKey);
-    const calibRow = computedRows.find((item) => item.key === calibCacheKey);
-    const decisionRow = computedRows.find((item) => item.key === decisionCacheKey);
+    const evalRow = computedRows.find((item) => item.key === primaryEvalCacheKey);
+    const calibRow = computedRows.find((item) => item.key === primaryCalibCacheKey);
+    const decisionRow = computedRows.find((item) => item.key === primaryDecisionCacheKey);
 
     if (!evalRow || !calibRow || !decisionRow) {
       throw new Error("Falha de consistência no computedCache: registros analíticos não encontrados.");

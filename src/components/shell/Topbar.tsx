@@ -14,6 +14,7 @@ const routeTitles: Record<string, { crumbs: string; title: string }> = {
   "/import": { crumbs: "Analytics / Import", title: "Importador Excel" },
   "/aovivo": { crumbs: "Analytics / AoVivo", title: "Monitor Ao Vivo" },
   "/h2h": { crumbs: "Analytics / Confronto", title: "Head-to-Head" },
+  "/auditoria": { crumbs: "Analytics / Auditoria", title: "Audit Lab" },
   "/notes": { crumbs: "Organização / Notas", title: "Knowledge Notes" },
   "/calendar": { crumbs: "Organização / Calendário", title: "Calendar Hub" },
   "/secure": { crumbs: "Privado / Secure", title: "Vault Gate" },
@@ -24,10 +25,48 @@ const quickRoutes = [
   { label: "Importar", href: "/import" },
   { label: "AoVivo", href: "/aovivo" },
   { label: "Confronto H2H", href: "/h2h" },
+  { label: "Auditoria", href: "/auditoria" },
   { label: "Notas", href: "/notes" },
   { label: "Calendário", href: "/calendar" },
   { label: "Secure", href: "/secure" },
 ];
+
+function normalizeInline(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function parseCommand(raw: string) {
+  const text = normalizeInline(raw);
+  if (!text) return { kind: "empty" as const };
+
+  if (text.startsWith("@")) {
+    const nick = text.slice(1).trim();
+    return nick ? { kind: "player" as const, nick } : { kind: "empty" as const };
+  }
+
+  const [headRaw = "", ...rest] = text.split(":");
+  const head = headRaw.trim().toLowerCase();
+  const tail = rest.join(":").trim();
+
+  if (head === "player") {
+    return tail ? { kind: "player" as const, nick: tail } : { kind: "empty" as const };
+  }
+
+  if (head === "league") {
+    return tail ? { kind: "league" as const, league: tail } : { kind: "empty" as const };
+  }
+
+  if (head === "line") {
+    const value = Number(tail);
+    return Number.isFinite(value) ? { kind: "line" as const, line: value } : { kind: "unknown" as const };
+  }
+
+  if (head === "note" || head === "notes") {
+    return tail ? { kind: "notes" as const, query: tail } : { kind: "notes" as const, query: "" };
+  }
+
+  return { kind: "palette" as const, query: text };
+}
 
 const quickActions = [
   { label: "Ação: Reimportar Excel", run: (router: ReturnType<typeof useRouter>) => router.push("/import") },
@@ -105,6 +144,45 @@ export function Topbar({ onOpenMenu }: { onOpenMenu: () => void }) {
     .filter((nick) => nick.toLowerCase().includes(paletteQuery.toLowerCase()))
     .slice(0, 6);
 
+  const runTopSearch = () => {
+    const cmd = parseCommand(query);
+    if (cmd.kind === "empty") return;
+
+    if (cmd.kind === "player") {
+      setQuery("");
+      router.push(`/player/${encodeURIComponent(cmd.nick)}`);
+      return;
+    }
+
+    if (cmd.kind === "league") {
+      useAppStore.getState().setLeague(cmd.league);
+      setQuery("");
+      router.push("/dashboard");
+      return;
+    }
+
+    if (cmd.kind === "line") {
+      useAppStore.getState().setLine(cmd.line);
+      setQuery("");
+      router.push("/dashboard");
+      return;
+    }
+
+    if (cmd.kind === "notes") {
+      setQuery("");
+      const q = cmd.query ? `?q=${encodeURIComponent(cmd.query)}` : "";
+      router.push(`/notes${q}`);
+      return;
+    }
+
+    if (cmd.kind === "palette") {
+      setCommandPaletteOpen(true);
+      setPaletteQuery(cmd.query);
+      setQuery("");
+      return;
+    }
+  };
+
   return (
     <>
       <header className="topbar">
@@ -118,7 +196,10 @@ export function Topbar({ onOpenMenu }: { onOpenMenu: () => void }) {
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Buscar jogador (@nick) ou nota (note:tag)..."
+            onKeyDown={(event) => {
+              if (event.key === "Enter") runTopSearch();
+            }}
+            placeholder="@nick • league:eSoccer • line:6.5 • note:tag (Enter)"
             aria-label="Busca global"
           />
         </div>

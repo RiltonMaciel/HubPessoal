@@ -17,10 +17,28 @@ function normalizeConfidence(confidence: Confidence): ConfidenceUpper {
   return "BAIXA";
 }
 
+function normalizeMarket(market: string) {
+  return market.trim().toLowerCase().replace(/^ou-/, "ou");
+}
+
+function parseOuLine(market: string) {
+  const normalized = normalizeMarket(market);
+  if (!normalized.startsWith("ou")) return null;
+  const value = Number(normalized.slice(2));
+  return Number.isFinite(value) ? value : null;
+}
+
+function clamp01(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
 function resolveOutcomeByMarket(match: MatchRecord, market: string) {
   const total = match.homeGoals + match.awayGoals;
   const isHome = match.homeGoals > match.awayGoals;
   const isAway = match.homeGoals < match.awayGoals;
+
+  const normalizedMarket = normalizeMarket(market);
+  const ouLine = parseOuLine(normalizedMarket);
 
   return {
     homeGoals: match.homeGoals,
@@ -32,7 +50,7 @@ function resolveOutcomeByMarket(match: MatchRecord, market: string) {
       "ou4.5": total > 4.5,
       "ou5.5": total > 5.5,
       "ou6.5": total > 6.5,
-      [market]: /ou\d+(\.\d+)?/i.test(market) ? total > Number(market.replace("ou", "")) : false,
+      ...(ouLine != null ? { [normalizedMarket]: total > ouLine } : {}),
     },
     btts: match.homeGoals > 0 && match.awayGoals > 0,
   } as const;
@@ -142,9 +160,10 @@ export async function getLedgerByPreset(params: {
   to?: string;
 }) {
   const rows = await db.predictionLedger.toArray();
+  const expectedMarket = params.market ? normalizeMarket(params.market) : null;
   return rows.filter((item) => {
     if (params.presetId && item.presetId !== params.presetId) return false;
-    if (params.market && item.market !== params.market) return false;
+    if (expectedMarket && normalizeMarket(item.market) !== expectedMarket) return false;
     if (params.league && item.league !== params.league) return false;
     if (params.from && item.createdAt < params.from) return false;
     if (params.to && item.createdAt > params.to) return false;
@@ -155,8 +174,10 @@ export async function getLedgerByPreset(params: {
 function resolveHit(item: PredictionLedgerRecord) {
   if (!item.outcome) return null;
 
-  if (item.market.toLowerCase().startsWith("ou")) {
-    const key = item.market.toLowerCase();
+  const market = normalizeMarket(item.market);
+
+  if (market.startsWith("ou")) {
+    const key = market;
     const marketResult = item.outcome.overByLine[key];
     if (typeof marketResult !== "boolean") return null;
 
@@ -164,11 +185,24 @@ function resolveHit(item: PredictionLedgerRecord) {
     return !marketResult ? 1 : 0;
   }
 
-  if (item.market.toLowerCase() === "btts") {
+  if (market === "btts") {
     if (item.pCalibrated >= 0.5) return item.outcome.btts ? 1 : 0;
     return !item.outcome.btts ? 1 : 0;
   }
 
+  return null;
+}
+
+function resolveOutcome01(item: PredictionLedgerRecord): 0 | 1 | null {
+  if (!item.outcome) return null;
+  const market = normalizeMarket(item.market);
+  if (market === "btts") return item.outcome.btts ? 1 : 0;
+  if (market.startsWith("ou")) {
+    const line = parseOuLine(market);
+    if (line == null) return null;
+    const total = item.outcome.homeGoals + item.outcome.awayGoals;
+    return total > line ? 1 : 0;
+  }
   return null;
 }
 
@@ -188,12 +222,16 @@ export async function getPerformanceSummary(params?: {
     .map((item) => resolveHit(item))
     .filter((value): value is 0 | 1 => value === 0 || value === 1);
 
-  const brier = resolved.length
-    ? resolved.reduce((acc, item) => {
-        const hit = resolveHit(item);
-        if (hit == null) return acc;
-        return acc + (item.pCalibrated - hit) ** 2;
-      }, 0) / resolved.length
+  const outcomePoints = resolved
+    .map((item) => {
+      const outcome = resolveOutcome01(item);
+      if (outcome == null) return null;
+      return { p: clamp01(item.pCalibrated), outcome };
+    })
+    .filter((item): item is { p: number; outcome: 0 | 1 } => Boolean(item));
+
+  const brier = outcomePoints.length
+    ? outcomePoints.reduce((acc, item) => acc + (item.p - item.outcome) ** 2, 0) / outcomePoints.length
     : 0;
 
   const byDecision: PerformanceSummary["byDecision"] = {

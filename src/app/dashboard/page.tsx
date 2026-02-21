@@ -403,7 +403,7 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!datasetVersion || !importedAt || !dashboard.totalGames) return;
     const presetId = selectedPresetId || "adhoc";
-    const market = `ou-${line}`;
+    const market = `ou${line}`;
 
     void db.computedCache.bulkPut([
       {
@@ -452,7 +452,7 @@ export default function DashboardPage() {
     if (!datasetVersion || !importedAt) return;
     if (!contextUpcomingMatch || !contextSignals) return;
     const presetId = selectedPresetId || "adhoc";
-    const market = `ou-${line}`;
+    const market = `ou${line}`;
 
     void db.computedCache.put({
       key: buildCacheKey("derived", datasetVersion, presetId, market, league),
@@ -520,7 +520,7 @@ export default function DashboardPage() {
     const presetId = selectedPresetId || "adhoc";
     void getPerformanceSummary({
       presetId,
-      market: `ou-${line}`,
+      market: `ou${line}`,
       league: league === "all" ? undefined : league,
     }).then(setPerformance);
   }, [selectedPresetId, line, league, dashboard.decision.recommendation]);
@@ -536,7 +536,7 @@ export default function DashboardPage() {
       presetId: selectedPresetId || "adhoc",
       routeContext: "dashboard",
       match: target,
-      market: `ou-${line}`,
+      market: `ou${line}`,
       pRaw: dashboard.calibration.currentRaw ?? dashboard.selectedOverRate,
       pCalibrated: dashboard.calibration.currentCalibrated ?? dashboard.selectedOverRate,
       decision: dashboard.decision.recommendation,
