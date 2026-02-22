@@ -18,6 +18,7 @@ type ExportResponse = {
 };
 
 const DEFAULT_URL = "https://betsapi.com/le/37298/Esoccer-H2H-GG-League--8-mins-play";
+const BETSAPI_LAST_COMPETITION_URL_KEY = "hubpessoal-betsapi-last-competition-url-v1";
 const BETSAPI_CLEARANCE_VALUE_KEY = "hubpessoal-betsapi-cf-clearance-v1";
 const BETSAPI_COOKIE_FULL_KEY = "hubpessoal-betsapi-cookie-full-v1";
 const BETSAPI_COOKIE_SHARED_KEY = "hubpessoal-betsapi-cookie-v1";
@@ -97,6 +98,14 @@ export default function BetsApiPage() {
 
     setStorageReady(true);
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(BETSAPI_LAST_COMPETITION_URL_KEY, url);
+    } catch {
+      // ignore quota/privacy errors
+    }
+  }, [url]);
 
   function persistSavedCompetitions(next: string[]) {
     setSavedCompetitions(next);

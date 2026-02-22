@@ -371,3 +371,44 @@ export const defaultConfig: ConfigRecord = {
   simulations: 20000,
   minGamesConfidence: 5,
 };
+
+export type MatchDetailsEvent = {
+  minute: number | null;
+  label: string;
+  team: string;
+};
+
+export type MatchDetailsStats = {
+  goalsHome: number;
+  goalsAway: number;
+  cornersHome: number;
+  cornersAway: number;
+  yellowHome: number;
+  yellowAway: number;
+  redHome: number;
+  redAway: number;
+  penaltiesHome: number;
+  penaltiesAway: number;
+  substitutionsHome: number;
+  substitutionsAway: number;
+  attacksHome: number;
+  attacksAway: number;
+  dangerousAttacksHome: number;
+  dangerousAttacksAway: number;
+  onTargetHome: number;
+  onTargetAway: number;
+};
+
+export type MatchDetailsRecord = {
+  id: string;
+  matchId: string;
+  createdAt: string;
+  updatedAt: string;
+  homeLabel?: string;
+  awayLabel?: string;
+  dateTimeLabel?: string;
+  stats: MatchDetailsStats;
+  events: MatchDetailsEvent[];
+  source: "rawText" | "url";
+  sourceRef?: string;
+};

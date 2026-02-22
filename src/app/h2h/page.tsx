@@ -2,6 +2,7 @@
 
 import * as XLSX from "xlsx";
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { db } from "@/lib/db";
 import { applyAliasesToMatches, getAliasMap } from "@/lib/aliases";
 import { decideRecommendation } from "@/lib/decision";
@@ -1811,7 +1812,15 @@ export default function HeadToHeadPage() {
                             <td>{m.league}</td>
                             <td><div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}><PlayerAvatar nick={m.homeNick} size={24} radius={10} /><span>{m.homeNick} ({m.homeTeam})</span></div></td>
                             <td><div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}><PlayerAvatar nick={m.awayNick} size={24} radius={10} /><span>{m.awayNick} ({m.awayTeam})</span></div></td>
-                            <td className="right">{m.homeGoals}–{m.awayGoals}</td>
+                            <td className="right">
+                              <Link
+                                href={`/h2h/match/${encodeURIComponent(m.id)}`}
+                                style={{ textDecoration: "underline" }}
+                                aria-label={`Abrir detalhes: ${m.homeNick} ${m.homeGoals}-${m.awayGoals} ${m.awayNick}`}
+                              >
+                                {m.homeGoals}–{m.awayGoals}
+                              </Link>
+                            </td>
                             <td className="right">{total}</td>
                             <td className="right"><Badge tone={total > line ? "good" : "warn"}>{getOuOutcomeLabel(total)}</Badge></td>
                           </tr>

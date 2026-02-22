@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { InfoHint } from "@/components/ui/InfoHint";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Table } from "@/components/ui/Table";
@@ -22,6 +23,39 @@ const resolvedViews: ResolvedView[] = [
   { resolved: false, label: "Todos" },
   { resolved: true, label: "Somente resolvidos" },
 ];
+
+const HELP = {
+  page:
+    "Esta página é uma auditoria OFFLINE das previsões geradas pelo app.\n\nO que você consegue medir aqui:\n- Quantas previsões foram feitas (Total).\n- Quantas já têm resultado conhecido (Resolvidos).\n- Performance real: Hit-rate e Brier (apenas nos pontuáveis).\n\nRegras importantes:\n- Hit-rate e Brier só fazem sentido quando há 'outcome' (resultado) salvo no ledger.\n- 'pCal' é a probabilidade calibrada (0..1).\n- Threshold atual para virar 'Sim' vs 'Não': pCal >= 0.50.\n\nExemplo rápido:\n- Mercado ou6.5, pCal=0.72 => previsão 'Over'.\n- Resultado total=8 => hit=✓.\n- Resultado total=4 => hit=✗.",
+  context:
+    "Contexto (Ctx) indica de onde a previsão foi gerada:\n- dashboard: recomendações do Command Center\n- h2h: confronto direto\n- aovivo: monitor ao vivo\n\nExemplo: se você filtra 'aovivo', você avalia somente decisões tomadas ao vivo.",
+  decision:
+    "Decisão é a classificação final do sistema para aquela previsão:\n- APOSTAVEL: passou gates (amostra, edge, drift, confiabilidade, etc.)\n- CAUTELA: sinal existe, mas é frágil (stake menor / aguardar)\n- EVITAR: sinal bloqueado (risco alto / ruído / baixa confiabilidade)\n- SEM_SINAL: neutro\n\nDica: a auditoria fica mais honesta filtrando 'APOSTAVEL' e comparando com o resto.",
+  market:
+    "Mercado é o alvo binário que a previsão tentou acertar.\n\nFormatos comuns:\n- btts: ambas marcam (Sim/Não)\n- ou6.5, ou2.5, ou8.5...: Over/Under por linha\n\nComo vira 0/1 internamente:\n- btts => 1 se outcome.btts=true\n- ouL => 1 se (homeGoals+awayGoals) > L\n\nExemplos:\n- ou6.5 com total=7 => outcome=1 (Over)\n- ou6.5 com total=6 => outcome=0 (Under)",
+  league:
+    "Liga permite segmentar performance por competição.\n\nExemplo: uma liga de 8 mins pode ter média de gols diferente de outra.\nSe o Brier piora muito numa liga, considere:\n- reimportar/limpar dados\n- reduzir agressividade\n- usar recortes mais robustos.",
+  dateRange:
+    "Filtro de datas usa o campo createdAt (quando a previsão foi registrada).\n\nExemplo: De=2026-02-01 Até=2026-02-21 pega somente previsões criadas nesse intervalo.",
+  resolvedOnly:
+    "Resolvidos = itens que têm resolvedAt + outcome preenchidos (resultado conhecido).\n\nSomente resolvidos é o filtro correto para medir Hit-rate e Brier.\n\nAtenção: se você estiver com muitos 'Em aberto', a auditoria ainda é útil para volume, mas não para performance.",
+  total:
+    "Total = quantidade de previsões após aplicar os filtros.\n\nExemplo: se você filtra mercado=ou6.5 e decisão=APOSTAVEL, o Total vira o tamanho dessa amostra.",
+  resolved:
+    "Resolvidos = previsões que já têm um resultado (outcome) registrado.\nEssas são as únicas que entram em métricas de performance.",
+  unresolved:
+    "Em aberto = previsões sem outcome (ainda não foi possível resolver/registrar o placar).\n\nCausas comuns:\n- previsão era para jogo futuro\n- faltou import de resultado\n- item foi gerado no AoVivo mas não foi fechado/resolvido.",
+  scored:
+    "Pontuáveis = resolvidos que o sistema consegue transformar em 0/1 (binário) para medir hit-rate e Brier.\n\nExemplo: mercados não-binários (se existirem) podem ficar fora.",
+  hit:
+    "Hit-rate = % de acertos no recorte.\n\nComo calculamos:\n- predicted = (pCal >= 0.5) ? 1 : 0\n- outcome = 1 (aconteceu) ou 0 (não aconteceu)\n- hit = 1 se predicted == outcome\n\nExemplos:\n1) ou6.5, pCal=0.72 => predicted=1 (Over)\n   total=8 => outcome=1 => hit=✓\n2) btts, pCal=0.61 => predicted=1 (BTTS Sim)\n   outcome.btts=false => outcome=0 => hit=✗\n\nInterpretação:\n- 58%+ tende a ser bom para decisões binárias, mas depende da qualidade do recorte.",
+  brier:
+    "Brier Score mede qualidade PROBABILÍSTICA (não só acerto).\n\nFórmula:\nBrier = média de (pCal - outcome)^2\n\nExemplos:\n- pCal=0.90 e outcome=1 => erro=(0.9-1)^2=0.01 (excelente)\n- pCal=0.60 e outcome=0 => erro=(0.6-0)^2=0.36 (ruim)\n\nLeitura:\n- menor é melhor\n- valores perto de 0.25 indicam algo próximo de 'chutar moeda' em cenário balanceado\n- não compare Brier entre mercados muito diferentes sem cuidado.",
+  pcal:
+    "Prob. mostra a probabilidade do LADO previsto (0..1).\n\nRegras:\n- Para mercados OU: o evento é 'Over'.\n  - Se pCal>=0.5 => Prev=Over e Prob=pCal\n  - Se pCal<0.5  => Prev=Under e Prob=(1-pCal)\n- Para BTTS: o evento é 'BTTS Sim'.\n  - Se pCal>=0.5 => Prev=Sim e Prob=pCal\n  - Se pCal<0.5  => Prev=Não e Prob=(1-pCal)\n\nIsso evita confusão quando pCal é baixo: um pCal=0.32 quer dizer 68% para o lado oposto.",
+  status:
+    "Res. (resultado) mostra se o item já foi resolvido:\n- ✓ = resolvido (tem outcome)\n- … = em aberto (sem outcome)",
+} as const;
 
 function clamp01(value: number) {
   return Math.max(0, Math.min(1, value));
@@ -66,6 +100,38 @@ function resolveHit01(item: PredictionLedgerRecord): 0 | 1 | null {
   if (outcome == null) return null;
   const predicted = clamp01(item.pCalibrated) >= 0.5 ? 1 : 0;
   return predicted === outcome ? 1 : 0;
+}
+
+function resolvePredictionView(item: PredictionLedgerRecord): {
+  label: string;
+  prob: number;
+  predicted01: 0 | 1;
+} {
+  const p = clamp01(item.pCalibrated);
+  const predicted01: 0 | 1 = p >= 0.5 ? 1 : 0;
+
+  const market = normalizeMarket(item.market).toLowerCase();
+  if (market === "btts") {
+    return {
+      label: predicted01 === 1 ? "BTTS Sim" : "BTTS Não",
+      prob: predicted01 === 1 ? p : 1 - p,
+      predicted01,
+    };
+  }
+
+  if (market.startsWith("ou")) {
+    return {
+      label: predicted01 === 1 ? "Over" : "Under",
+      prob: predicted01 === 1 ? p : 1 - p,
+      predicted01,
+    };
+  }
+
+  return {
+    label: predicted01 === 1 ? "Sim" : "Não",
+    prob: predicted01 === 1 ? p : 1 - p,
+    predicted01,
+  };
 }
 
 export default function AuditoriaPage() {
@@ -197,7 +263,7 @@ export default function AuditoriaPage() {
       <Card className="col-12">
         <CardHeader>
           <div>
-            <h3>Auditoria / Performance</h3>
+            <h3>Auditoria / Performance <InfoHint text={HELP.page} /></h3>
             <small>Ledger offline de previsões (hit-rate e Brier em resolvidos)</small>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -206,44 +272,56 @@ export default function AuditoriaPage() {
         </CardHeader>
         <CardBody>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 10 }}>
-            <Select value={routeContext} onChange={(event) => setRouteContext(event.target.value as RouteContext | "all")}>
+            <div style={{ display: "grid", gap: 6 }}>
+              <small className="mini">Contexto <InfoHint text={HELP.context} /></small>
+              <Select value={routeContext} onChange={(event) => setRouteContext(event.target.value as RouteContext | "all")}>
               <option value="all">Contexto: todos</option>
               <option value="dashboard">dashboard</option>
               <option value="h2h">h2h</option>
               <option value="aovivo">aovivo</option>
-            </Select>
+              </Select>
+            </div>
 
-            <Select value={decision} onChange={(event) => setDecision(event.target.value as RecommendationStatus | "all")}>
+            <div style={{ display: "grid", gap: 6 }}>
+              <small className="mini">Decisão <InfoHint text={HELP.decision} /></small>
+              <Select value={decision} onChange={(event) => setDecision(event.target.value as RecommendationStatus | "all")}>
               <option value="all">Decisão: todas</option>
               <option value="APOSTAVEL">APOSTAVEL</option>
               <option value="CAUTELA">CAUTELA</option>
               <option value="EVITAR">EVITAR</option>
               <option value="SEM_SINAL">SEM_SINAL</option>
-            </Select>
+              </Select>
+            </div>
 
-            <Select value={market} onChange={(event) => setMarket(event.target.value)}>
-              {markets.map((item) => (
-                <option key={item} value={item}>
-                  {item === "all" ? "Mercado: todos" : item}
-                </option>
-              ))}
-            </Select>
+            <div style={{ display: "grid", gap: 6 }}>
+              <small className="mini">Mercado <InfoHint text={HELP.market} /></small>
+              <Select value={market} onChange={(event) => setMarket(event.target.value)}>
+                {markets.map((item) => (
+                  <option key={item} value={item}>
+                    {item === "all" ? "Mercado: todos" : item}
+                  </option>
+                ))}
+              </Select>
+            </div>
 
-            <Select value={league} onChange={(event) => setLeague(event.target.value)}>
-              {leagues.map((item) => (
-                <option key={item} value={item}>
-                  {item === "all" ? "Liga: todas" : item}
-                </option>
-              ))}
-            </Select>
+            <div style={{ display: "grid", gap: 6 }}>
+              <small className="mini">Liga <InfoHint text={HELP.league} /></small>
+              <Select value={league} onChange={(event) => setLeague(event.target.value)}>
+                {leagues.map((item) => (
+                  <option key={item} value={item}>
+                    {item === "all" ? "Liga: todas" : item}
+                  </option>
+                ))}
+              </Select>
+            </div>
 
             <label style={{ display: "grid", gap: 6 }}>
-              <small className="mini">De</small>
+              <small className="mini">De <InfoHint text={HELP.dateRange} /></small>
               <input className="select" type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
             </label>
 
             <label style={{ display: "grid", gap: 6 }}>
-              <small className="mini">Até</small>
+              <small className="mini">Até <InfoHint text={HELP.dateRange} /></small>
               <input className="select" type="date" value={to} onChange={(event) => setTo(event.target.value)} />
             </label>
           </div>
@@ -257,15 +335,17 @@ export default function AuditoriaPage() {
               ))}
             </Select>
 
-            <Badge>Total: {metrics.total}</Badge>
-            <Badge>Resolvidos: {metrics.resolvedTotal}</Badge>
-            <Badge>Em aberto: {metrics.unresolved}</Badge>
-            <Badge tone={metrics.scoredTotal ? "good" : "warn"}>Pontuáveis: {metrics.scoredTotal}</Badge>
+            <InfoHint text={HELP.resolvedOnly} />
+
+            <Badge>Total: {metrics.total} <InfoHint text={HELP.total} /></Badge>
+            <Badge>Resolvidos: {metrics.resolvedTotal} <InfoHint text={HELP.resolved} /></Badge>
+            <Badge>Em aberto: {metrics.unresolved} <InfoHint text={HELP.unresolved} /></Badge>
+            <Badge tone={metrics.scoredTotal ? "good" : "warn"}>Pontuáveis: {metrics.scoredTotal} <InfoHint text={HELP.scored} /></Badge>
             <Badge tone={metrics.hitRate >= 0.58 ? "good" : metrics.hitRate >= 0.52 ? "warn" : "bad"}>
-              Hit: {(metrics.hitRate * 100).toFixed(1)}%
+              Hit: {(metrics.hitRate * 100).toFixed(1)}% <InfoHint text={HELP.hit} />
             </Badge>
             <Badge tone={metrics.brier && metrics.brier <= 0.23 ? "good" : "warn"}>
-              Brier: {metrics.brier.toFixed(4)}
+              Brier: {metrics.brier.toFixed(4)} <InfoHint text={HELP.brier} />
             </Badge>
           </div>
 
@@ -281,7 +361,7 @@ export default function AuditoriaPage() {
       <Card className="col-12">
         <CardHeader>
           <div>
-            <h3>Últimas previsões</h3>
+            <h3>Últimas previsões <InfoHint text={HELP.page} /></h3>
             <small>Até 80 itens (respeita filtros)</small>
           </div>
         </CardHeader>
@@ -303,28 +383,31 @@ export default function AuditoriaPage() {
             <Table>
               <thead>
                 <tr>
-                  <th>Quando</th>
-                  <th>Ctx</th>
-                  <th>Liga</th>
-                  <th>Mercado</th>
-                  <th>Decisão</th>
-                  <th className="right">pCal</th>
-                  <th className="right">Res.</th>
-                  <th className="right">Hit</th>
+                  <th>Quando <InfoHint text={HELP.dateRange} /></th>
+                  <th>Ctx <InfoHint text={HELP.context} /></th>
+                  <th>Liga <InfoHint text={HELP.league} /></th>
+                  <th>Mercado <InfoHint text={HELP.market} /></th>
+                  <th>Prev. <InfoHint text={HELP.hit} /></th>
+                  <th>Decisão <InfoHint text={HELP.decision} /></th>
+                  <th className="right">Prob. <InfoHint text={HELP.pcal} /></th>
+                  <th className="right">Res. <InfoHint text={HELP.status} /></th>
+                  <th className="right">Hit <InfoHint text={HELP.hit} /></th>
                 </tr>
               </thead>
               <tbody>
                 {visibleRows.map((item) => {
                   const resolved = Boolean(item.resolvedAt && item.outcome);
                   const hit = resolveHit01(item);
+                  const view = resolvePredictionView(item);
                   return (
                     <tr key={item.id}>
                       <td>{new Date(item.createdAt).toLocaleString("pt-BR")}</td>
                       <td>{item.routeContext}</td>
                       <td>{item.league ?? "-"}</td>
                       <td>{normalizeMarket(item.market)}</td>
+                      <td>{view.label}</td>
                       <td>{item.decision}</td>
-                      <td className="right">{(clamp01(item.pCalibrated) * 100).toFixed(1)}%</td>
+                      <td className="right">{(view.prob * 100).toFixed(1)}%</td>
                       <td className="right">{resolved ? "✓" : "…"}</td>
                       <td className="right">{hit == null ? "-" : hit === 1 ? "✓" : "✗"}</td>
                     </tr>

@@ -113,6 +113,7 @@ type DeepStats = {
   bttsProb: number;
   markets: MarketLine[];
   overCurve: Array<{ line: string; probability: number }>;
+  underCurve: Array<{ line: string; probability: number }>;
   resultBars: Array<{ label: string; probability: number }>;
   recommendationStatus: "APOSTAVEL" | "CAUTELA" | "EVITAR" | "SEM_SINAL";
   recommendationReasons: string[];
@@ -126,12 +127,16 @@ type FavoriteCalibration = {
 };
 
 const DEFAULT_URL = "https://betsapi.com/ls/37298/Esoccer-H2H-GG-League--8-mins-play";
+const BETSAPI_LAST_COMPETITION_URL_KEY = "hubpessoal-betsapi-last-competition-url-v1";
 const POLL_MS = 1000;
 const AOVIVO_SNAPSHOT_KEY = "hubpessoal-aovivo-snapshot-v1";
 const AOVIVO_COOKIE_KEY = "hubpessoal-betsapi-cookie-v1";
 const AOVIVO_SAVED_COMPETITIONS_KEY = "hubpessoal-betsapi-saved-competitions-v1";
+const AOVIVO_OU_LINE_KEY = "hubpessoal-aovivo-ou-line-v1";
 const AOVIVO_PAGE_SIZE = 50;
 const MAX_CALIBRATION_MATCHES = 180;
+
+const OU_LINE_OPTIONS = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5] as const;
 
 function normalizeCompetitionUrl(value: string) {
   const trimmed = value.trim();
@@ -198,6 +203,10 @@ const HELP = {
     "Distribuição de resultado final (1X2).\n\nServe para ver se o modelo está realmente 'puxando' para Casa/Fora ou se está indeciso (Empate alto).",
   overCurve:
     "Curva Over (todas as linhas) mostra a probabilidade estimada do total de gols ultrapassar cada linha (2.5..7.5 etc).\n\nCurva alta em várias linhas = jogo com tendência de muitos gols.",
+  ouBoard:
+    "Over/Under (na tabela) é uma estimativa do total de gols do jogo ultrapassar (Over) ou não ultrapassar (Under) a linha OU selecionada.\n\nComo calculamos:\n- estimamos xG Casa/Fora a partir de forma recente (GF/GA) + média da liga;\n- xG Total = xG Casa + xG Fora;\n- probabilidades via distribuição de Poisson no total (modelo simples, conservador).\n\nConfiabilidade:\n- depende do tamanho da base importada e da amostra de cada nick;\n- se a coleta AoVivo estiver rebaixada (gate), trate como indicativo, não como certeza.",
+  ouAudit:
+    "Over/Under é derivado diretamente do xG Total (expTotalGoals) usando Poisson:\n- P(Over L) = 1 - CDF(⌊L⌋, λ=xG Total)\n- P(Under L) = CDF(⌊L⌋, λ=xG Total)\n\nPor que isso pode errar:\n- não usa odds reais nem xG oficial;\n- depende de qualidade do histórico importado;\n- mudanças de regime/tilt podem alterar ritmo.\n\nUse junto com: cobertura da base, confiabilidade da coleta e curva completa por linhas.",
   form:
     "Forma = estatísticas recentes em janela móvel (gols pró/contra, PPG, W/D/L).\n\nAjuda a confirmar se o favorito está consistente ou se é só ruído.",
   markets:
@@ -441,6 +450,12 @@ function buildDeepStats(row: LiveRow, matches: MatchRecord[], strengths: Map<str
     return { line: `Over ${line}`, probability };
   });
 
+  const underCurve = totalLines.map((line) => {
+    const floorLine = Math.floor(line);
+    const probability = clamp(poissonCdf(floorLine, expTotalGoals), 0, 1);
+    return { line: `Under ${line}`, probability };
+  });
+
   const resultBars = [
     { label: "Casa", probability: winner.home },
     { label: "Empate", probability: winner.draw },
@@ -461,6 +476,11 @@ function buildDeepStats(row: LiveRow, matches: MatchRecord[], strengths: Map<str
       probability: item.probability,
       fairOdd: roundOdd(item.probability),
     })),
+    ...underCurve.map((item) => ({
+      market: item.line,
+      probability: item.probability,
+      fairOdd: roundOdd(item.probability),
+    })),
   ];
 
   return {
@@ -477,6 +497,7 @@ function buildDeepStats(row: LiveRow, matches: MatchRecord[], strengths: Map<str
     bttsProb,
     markets,
     overCurve,
+    underCurve,
     resultBars,
     recommendationStatus: "SEM_SINAL",
     recommendationReasons: [],
@@ -548,6 +569,7 @@ export default function AoVivoPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lightMode, setLightMode] = useState(false);
   const [safeMode, setSafeMode] = useState(true);
+  const [ouLine, setOuLine] = useState<number>(6.5);
   const [cookieStorageReady, setCookieStorageReady] = useState(false);
   const [refreshMs, setRefreshMs] = useState(POLL_MS);
   const [rows, setRows] = useState<LiveRow[]>([]);
@@ -568,6 +590,14 @@ export default function AoVivoPage() {
   const inFlightRef = useRef(false);
   const debouncedUrl = useDebouncedValue(url, 300);
   const debouncedMaxPages = useDebouncedValue(maxPages, 300);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(BETSAPI_LAST_COMPETITION_URL_KEY, url);
+    } catch {
+      // ignore
+    }
+  }, [url]);
 
   useEffect(() => {
     let cancelled = false;
@@ -605,6 +635,26 @@ export default function AoVivoPage() {
     if (typeof rawCookie === "string") setBetApiCookie(rawCookie);
     setCookieStorageReady(true);
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(AOVIVO_OU_LINE_KEY);
+      const numeric = raw != null ? Number(raw) : NaN;
+      if (OU_LINE_OPTIONS.includes(numeric as any)) {
+        setOuLine(numeric);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AOVIVO_OU_LINE_KEY, String(ouLine));
+    } catch {
+      // ignore
+    }
+  }, [ouLine]);
 
   useEffect(() => {
     try {
@@ -939,6 +989,56 @@ export default function AoVivoPage() {
     return boardWithProb.slice(start, start + AOVIVO_PAGE_SIZE);
   }, [boardWithProb, boardPage]);
 
+  const boardVisibleWithOu = useMemo(() => {
+    const floorLine = Math.floor(ouLine);
+
+    if (lightMode) {
+      return boardVisible.map((item) => ({
+        ...item,
+        ou: null as null | { over: number; under: number; confidence: "Alta" | "Média" | "Baixa" },
+      }));
+    }
+
+    const windowCache = new Map<string, TeamWindowStats>();
+    const leagueAvgGf = aliasedMatches.length
+      ? aliasedMatches.reduce((acc, m) => acc + m.homeGoals + m.awayGoals, 0) / aliasedMatches.length / 2
+      : 1.8;
+
+    const getWindow = (nickRaw?: string) => {
+      const key = normalizeNick(nickRaw);
+      if (!key) return null;
+      const cached = windowCache.get(key);
+      if (cached) return cached;
+      const computed = computeTeamWindowStats(key, aliasedMatches);
+      windowCache.set(key, computed);
+      return computed;
+    };
+
+    return boardVisible.map((item) => {
+      const homeKey = normalizeNick(item.row.homeNick ?? item.row.homeTeam);
+      const awayKey = normalizeNick(item.row.awayNick ?? item.row.awayTeam);
+      const homeGames = strengths.get(homeKey)?.games ?? 0;
+      const awayGames = strengths.get(awayKey)?.games ?? 0;
+      const minGames = Math.min(homeGames, awayGames);
+      const confidence = minGames >= 14 ? "Alta" : minGames >= 8 ? "Média" : "Baixa";
+
+      const homeStats = getWindow(item.row.homeNick);
+      const awayStats = getWindow(item.row.awayNick);
+
+      if (!homeStats || !awayStats) {
+        return { ...item, ou: null as null | { over: number; under: number; confidence: "Alta" | "Média" | "Baixa" } };
+      }
+
+      const expHomeGoals = clamp((homeStats.avgGoalsFor + awayStats.avgGoalsAgainst + leagueAvgGf) / 3, 0.3, 6.5);
+      const expAwayGoals = clamp((awayStats.avgGoalsFor + homeStats.avgGoalsAgainst + leagueAvgGf) / 3, 0.3, 6.5);
+      const expTotalGoals = expHomeGoals + expAwayGoals;
+      const pOver = clamp(1 - poissonCdf(floorLine, expTotalGoals), 0, 1);
+      const pUnder = clamp(1 - pOver, 0, 1);
+
+      return { ...item, ou: { over: pOver, under: pUnder, confidence } };
+    });
+  }, [boardVisible, lightMode, aliasedMatches, strengths, ouLine]);
+
   useEffect(() => {
     setBoardPage(1);
   }, [debouncedUrl, debouncedMaxPages, rows.length]);
@@ -1180,6 +1280,20 @@ export default function AoVivoPage() {
               </Button>
               <InfoHint text={HELP.safeMode} />
             </div>
+
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <select
+                className="select"
+                value={String(ouLine)}
+                onChange={(event) => setOuLine(Number(event.target.value))}
+                aria-label="Linha Over/Under no board"
+              >
+                {OU_LINE_OPTIONS.map((value) => (
+                  <option key={value} value={value}>{`OU ${value}`}</option>
+                ))}
+              </select>
+              <InfoHint text={HELP.ouBoard} />
+            </div>
           </div>
 
           {savedCompetitions.length > 0 ? (
@@ -1277,6 +1391,8 @@ export default function AoVivoPage() {
                     <th className="right">Casa</th>
                     <th className="right">Empate</th>
                     <th className="right">Fora</th>
+                    <th className="right">Over {ouLine} <InfoHint text={HELP.ouBoard} /></th>
+                    <th className="right">Under {ouLine} <InfoHint text={HELP.ouBoard} /></th>
                     <th className="right">Fav raw <InfoHint text={HELP.favoriteRaw} /></th>
                     <th className="right">Fav cal <InfoHint text={HELP.favoriteCal} /></th>
                     <th>Favorito</th>
@@ -1285,7 +1401,7 @@ export default function AoVivoPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {boardVisible.map(({ row, prob, favoriteRaw, favoriteCalibrated, recommendation }, index) => (
+                  {boardVisibleWithOu.map(({ row, prob, favoriteRaw, favoriteCalibrated, recommendation, ou }, index) => (
                     <tr key={`${row.eventTime}-${row.fixture}-${index}`}>
                       <td>{row.eventTime}</td>
                       <td>
@@ -1304,6 +1420,24 @@ export default function AoVivoPage() {
                       <td className="right">{(prob.home * 100).toFixed(1)}%</td>
                       <td className="right">{(prob.draw * 100).toFixed(1)}%</td>
                       <td className="right">{(prob.away * 100).toFixed(1)}%</td>
+                      <td className="right">
+                        {ou ? (
+                          <Badge tone={ou.over >= 0.62 ? "good" : ou.over >= 0.52 ? "warn" : "bad"}>
+                            {(ou.over * 100).toFixed(1)}% • {ou.confidence}
+                          </Badge>
+                        ) : (
+                          <span className="mini">-</span>
+                        )}
+                      </td>
+                      <td className="right">
+                        {ou ? (
+                          <Badge tone={ou.under >= 0.62 ? "good" : ou.under >= 0.52 ? "warn" : "bad"}>
+                            {(ou.under * 100).toFixed(1)}% • {ou.confidence}
+                          </Badge>
+                        ) : (
+                          <span className="mini">-</span>
+                        )}
+                      </td>
                       <td className="right">{(favoriteRaw * 100).toFixed(1)}%</td>
                       <td className="right">{(favoriteCalibrated * 100).toFixed(1)}%</td>
                       <td>
@@ -1380,6 +1514,21 @@ export default function AoVivoPage() {
               <Badge>xG Fora: {selectedDeepStats.expAwayGoals.toFixed(2)}</Badge>
               <Badge>xG Total: {selectedDeepStats.expTotalGoals.toFixed(2)}</Badge>
               <Badge>BTTS: {(selectedDeepStats.bttsProb * 100).toFixed(1)}%</Badge>
+              {(() => {
+                const over = selectedDeepStats.markets.find((item) => item.market === `Over ${ouLine}`);
+                const under = selectedDeepStats.markets.find((item) => item.market === `Under ${ouLine}`);
+                if (!over || !under) return null;
+                return (
+                  <>
+                    <Badge>
+                      Over {ouLine}: {(over.probability * 100).toFixed(1)}% <InfoHint text={HELP.ouAudit} />
+                    </Badge>
+                    <Badge>
+                      Under {ouLine}: {(under.probability * 100).toFixed(1)}% <InfoHint text={HELP.ouAudit} />
+                    </Badge>
+                  </>
+                );
+              })()}
               <Badge>H2H jogos: {selectedDeepStats.h2hGames}</Badge>
             </div>
 

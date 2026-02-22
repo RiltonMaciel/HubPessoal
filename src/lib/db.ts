@@ -7,6 +7,7 @@ import type {
   FilterPresetRecord,
   ImportSummary,
   MatchRecord,
+  MatchDetailsRecord,
   NoteRecord,
   Odds1X2Record,
   OddsOuRecord,
@@ -41,6 +42,7 @@ export type ComputedCache = {
 
 class HubDb extends Dexie {
   matches!: Table<MatchRecord, string>;
+  matchDetails!: Table<MatchDetailsRecord, string>;
   upcoming!: Table<UpcomingRecord, string>;
   odds1x2!: Table<Odds1X2Record, string>;
   oddsOu!: Table<OddsOuRecord, string>;
@@ -95,6 +97,27 @@ class HubDb extends Dexie {
 
     this.version(3).stores({
       matches: "id, league, dateTime, homeNick, awayNick",
+      upcoming: "id, league, dateTime, homeNick, awayNick",
+      odds1x2: "id, league, dateTime",
+      oddsOu: "id, league, line, dateTime",
+      config: "++id",
+      players: "nick",
+      notes: "id, type, pinned, updatedAt",
+      events: "id, date, holiday",
+      avatars: "nick",
+      rawDatasets: "id, importedAt",
+      computedCache: "key, importedAt",
+      predictionLedger: "id, createdAt, resolvedAt, routeContext, market, league, matchKey",
+      aliases: "id, nickOriginal, nickCanonico, updatedAt",
+      watchlist: "id, kind, value, createdAt",
+      secureMeta: "key",
+      secureItems: "id, area, updatedAt",
+      presets: "id, name, updatedAt",
+    });
+
+    this.version(4).stores({
+      matches: "id, league, dateTime, homeNick, awayNick",
+      matchDetails: "id, matchId, updatedAt",
       upcoming: "id, league, dateTime, homeNick, awayNick",
       odds1x2: "id, league, dateTime",
       oddsOu: "id, league, line, dateTime",
