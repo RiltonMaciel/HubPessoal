@@ -684,6 +684,7 @@ export default function AnaliseJogosPage() {
   const [mode, setMode] = useState<AnalysisMode>("conservador");
   const [sampleWindow, setSampleWindow] = useState<SampleWindow>(10);
   const [detailItem, setDetailItem] = useState<MatchInsight | null>(null);
+  const [analysisMatches, setAnalysisMatches] = useState<MatchRecord[]>([]);
 
   const canRun = useMemo(() => rawInput.trim().length > 0, [rawInput]);
 
@@ -735,6 +736,7 @@ export default function AnaliseJogosPage() {
 
       const [allMatches, aliasMap] = await Promise.all([db.matches.toArray(), getAliasMap()]);
       const normalizedMatches = applyAliasesToMatches(allMatches, aliasMap);
+      setAnalysisMatches(normalizedMatches);
 
       const normalizedFixtures = fixtures.map((fixture) => ({
         ...fixture,
@@ -819,6 +821,31 @@ export default function AnaliseJogosPage() {
     if (item.homeDeep.recent.avgGoalsAgainst >= 1.8 || item.awayDeep.recent.avgGoalsAgainst >= 1.8) curiosities.push("Defesa vulnerável no recorte recente (GA/j elevado)." );
     if (!curiosities.length) curiosities.push("Sem anomalia forte; cenário mais equilibrado no recorte atual.");
     return curiosities;
+  }
+
+  function getLastFivePlayerGames(nick: string) {
+    const target = normalizeText(nick);
+
+    return analysisMatches
+      .filter((match) => normalizeText(match.homeNick) === target || normalizeText(match.awayNick) === target)
+      .sort((left, right) => +new Date(right.dateTime) - +new Date(left.dateTime))
+      .slice(0, 5)
+      .map((match) => {
+        const isHome = normalizeText(match.homeNick) === target;
+        const goalsFor = isHome ? match.homeGoals : match.awayGoals;
+        const goalsAgainst = isHome ? match.awayGoals : match.homeGoals;
+        const opponent = isHome ? match.awayNick : match.homeNick;
+        const result = goalsFor > goalsAgainst ? "V" : goalsFor === goalsAgainst ? "E" : "D";
+
+        return {
+          id: match.id,
+          dateTime: match.dateTime,
+          team: isHome ? match.homeTeam : match.awayTeam,
+          opponent,
+          score: `${goalsFor}-${goalsAgainst}`,
+          result,
+        };
+      });
   }
 
   return (
@@ -1135,6 +1162,44 @@ export default function AnaliseJogosPage() {
                 <div style={{ flex: 1 }}>
                   <strong>{detailItem.fixture.awayNick}</strong>
                   <div className="mini">{detailItem.awayDeep.recent.wins}V/{detailItem.awayDeep.recent.draws}E/{detailItem.awayDeep.recent.losses}D • {detailItem.awayDeep.recent.points} pts • PPG {detailItem.awayDeep.recent.ppg.toFixed(2)}</div>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div className="card" style={{ padding: 10 }}>
+                  <strong>Últimos 5 jogos — {detailItem.fixture.homeNick}</strong>
+                  <div className="list" style={{ marginTop: 8 }}>
+                    {getLastFivePlayerGames(detailItem.fixture.homeNick).map((game) => (
+                      <div key={game.id} className="row" style={{ padding: "8px 10px" }}>
+                        <div style={{ display: "grid", gap: 2 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600 }}>{game.team} vs {game.opponent}</span>
+                          <span className="mini">{new Date(game.dateTime).toLocaleString("pt-BR")}</span>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ fontSize: 12, fontWeight: 700 }}>{game.score}</div>
+                          <span className={`badge ${game.result === "V" ? "good" : game.result === "E" ? "warn" : "bad"}`}>{game.result}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card" style={{ padding: 10 }}>
+                  <strong>Últimos 5 jogos — {detailItem.fixture.awayNick}</strong>
+                  <div className="list" style={{ marginTop: 8 }}>
+                    {getLastFivePlayerGames(detailItem.fixture.awayNick).map((game) => (
+                      <div key={game.id} className="row" style={{ padding: "8px 10px" }}>
+                        <div style={{ display: "grid", gap: 2 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600 }}>{game.team} vs {game.opponent}</span>
+                          <span className="mini">{new Date(game.dateTime).toLocaleString("pt-BR")}</span>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ fontSize: 12, fontWeight: 700 }}>{game.score}</div>
+                          <span className={`badge ${game.result === "V" ? "good" : game.result === "E" ? "warn" : "bad"}`}>{game.result}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
 
