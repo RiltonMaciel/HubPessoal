@@ -531,20 +531,51 @@ export default function HeadToHeadPage() {
   useEffect(() => {
     // Carrega último confronto e histórico de pesquisas.
     try {
-      const rawLast = window.localStorage.getItem(H2H_LAST_SEARCH_KEY);
-      if (rawLast) {
-        const parsed = JSON.parse(rawLast) as Partial<H2hSearchSnapshot>;
-        if (typeof parsed.playerA === "string") setPlayerA(parsed.playerA);
-        if (typeof parsed.playerB === "string") setPlayerB(parsed.playerB);
-        if (typeof parsed.teamA === "string") setTeamA(parsed.teamA);
-        if (typeof parsed.teamB === "string") setTeamB(parsed.teamB);
-        if (typeof parsed.line === "number" && Number.isFinite(parsed.line)) setLine(parsed.line);
-        if (typeof parsed.lastN === "string" && (lastNOptions as readonly string[]).includes(parsed.lastN)) {
-          setLastN(parsed.lastN as (typeof lastNOptions)[number]);
+      const params = new URLSearchParams(window.location.search);
+      const playerAFromQuery = params.get("playerA")?.trim() ?? "";
+      const playerBFromQuery = params.get("playerB")?.trim() ?? "";
+      const teamAFromQuery = params.get("teamA")?.trim() ?? "";
+      const teamBFromQuery = params.get("teamB")?.trim() ?? "";
+      const lineFromQuery = params.get("line")?.trim() ?? "";
+      const lastNFromQuery = params.get("lastN")?.trim() ?? "";
+      const tabFromQuery = params.get("tab")?.trim() ?? "";
+
+      const hasQueryPrefill = Boolean(playerAFromQuery || playerBFromQuery || teamAFromQuery || teamBFromQuery);
+
+      if (hasQueryPrefill) {
+        setPlayerA(playerAFromQuery);
+        setPlayerB(playerBFromQuery);
+        setTeamA(teamAFromQuery);
+        setTeamB(teamBFromQuery);
+
+        const parsedLine = Number(lineFromQuery);
+        if (Number.isFinite(parsedLine)) {
+          setLine(parsedLine);
         }
-        if (typeof parsed.activeTab === "string") {
-          const safeTab = parsed.activeTab as H2hTab;
-          if (safeTab === "analise" || safeTab === "excel" || safeTab === "jogador") setActiveTab(safeTab);
+
+        if ((lastNOptions as readonly string[]).includes(lastNFromQuery)) {
+          setLastN(lastNFromQuery as (typeof lastNOptions)[number]);
+        }
+
+        if (tabFromQuery === "analise" || tabFromQuery === "excel" || tabFromQuery === "jogador") {
+          setActiveTab(tabFromQuery);
+        }
+      } else {
+        const rawLast = window.localStorage.getItem(H2H_LAST_SEARCH_KEY);
+        if (rawLast) {
+          const parsed = JSON.parse(rawLast) as Partial<H2hSearchSnapshot>;
+          if (typeof parsed.playerA === "string") setPlayerA(parsed.playerA);
+          if (typeof parsed.playerB === "string") setPlayerB(parsed.playerB);
+          if (typeof parsed.teamA === "string") setTeamA(parsed.teamA);
+          if (typeof parsed.teamB === "string") setTeamB(parsed.teamB);
+          if (typeof parsed.line === "number" && Number.isFinite(parsed.line)) setLine(parsed.line);
+          if (typeof parsed.lastN === "string" && (lastNOptions as readonly string[]).includes(parsed.lastN)) {
+            setLastN(parsed.lastN as (typeof lastNOptions)[number]);
+          }
+          if (typeof parsed.activeTab === "string") {
+            const safeTab = parsed.activeTab as H2hTab;
+            if (safeTab === "analise" || safeTab === "excel" || safeTab === "jogador") setActiveTab(safeTab);
+          }
         }
       }
 

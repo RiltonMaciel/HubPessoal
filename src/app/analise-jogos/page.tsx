@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { db } from "@/lib/db";
 import { applyAliasesToMatches, getAliasMap } from "@/lib/aliases";
 import { logPrediction } from "@/lib/prediction-ledger";
@@ -95,8 +96,19 @@ type RecentSummary = {
   avgGoalsAgainst: number;
 };
 
+type RecoverySummary = {
+  score: number;
+  signal: boolean;
+  lossStreak: number;
+  goalsInLast3: number;
+  ppgLast3: number;
+  ppgPrev3: number;
+  reason: string;
+};
+
 type PlayerDeepSummary = {
   recent: RecentSummary;
+  recovery: RecoverySummary;
   topTeamsByPoints: TeamPeak[];
   worstTeamsByConceded: TeamFragility[];
   currentTeamConceded: TeamFragility | null;
@@ -483,6 +495,59 @@ function summarizePlayerDeep(matches: MatchRecord[], nick: string, sampleWindow:
     : "";
 
   const recentPoints = recentWins * 3 + recentDraws;
+
+  let lossStreak = 0;
+  for (const row of rows) {
+    const isHome = normalizeText(row.homeNick) === normalizedNick;
+    const goalsFor = isHome ? row.homeGoals : row.awayGoals;
+    const goalsAgainst = isHome ? row.awayGoals : row.homeGoals;
+    if (goalsFor < goalsAgainst) {
+      lossStreak += 1;
+      continue;
+    }
+    break;
+  }
+
+  const recent3 = rows.slice(0, 3);
+  const prev3 = rows.slice(3, 6);
+  const recent3Points = recent3.reduce((acc, row) => {
+    const isHome = normalizeText(row.homeNick) === normalizedNick;
+    const goalsFor = isHome ? row.homeGoals : row.awayGoals;
+    const goalsAgainst = isHome ? row.awayGoals : row.homeGoals;
+    if (goalsFor > goalsAgainst) return acc + 3;
+    if (goalsFor === goalsAgainst) return acc + 1;
+    return acc;
+  }, 0);
+  const prev3Points = prev3.reduce((acc, row) => {
+    const isHome = normalizeText(row.homeNick) === normalizedNick;
+    const goalsFor = isHome ? row.homeGoals : row.awayGoals;
+    const goalsAgainst = isHome ? row.awayGoals : row.homeGoals;
+    if (goalsFor > goalsAgainst) return acc + 3;
+    if (goalsFor === goalsAgainst) return acc + 1;
+    return acc;
+  }, 0);
+
+  const goalsInLast3 = recent3.filter((row) => {
+    const isHome = normalizeText(row.homeNick) === normalizedNick;
+    const goalsFor = isHome ? row.homeGoals : row.awayGoals;
+    return goalsFor > 0;
+  }).length;
+
+  const ppgLast3 = recent3.length ? recent3Points / recent3.length : 0;
+  const ppgPrev3 = prev3.length ? prev3Points / prev3.length : 0;
+
+  let recoveryScore = 0;
+  recoveryScore += clamp(lossStreak * 20, 0, 40);
+  recoveryScore += clamp(goalsInLast3 * 15, 0, 45);
+  recoveryScore += ppgLast3 > ppgPrev3 ? 15 : -5;
+  if (recentRows.length >= 3 && (recentGoalsFor / Math.max(1, recentRows.length)) >= 1.2) recoveryScore += 10;
+  recoveryScore = clamp(recoveryScore, 0, 100);
+
+  const recoverySignal = recoveryScore >= 60;
+  const recoveryReason = recoverySignal
+    ? `Recuperação provável: ${lossStreak} derrotas seguidas com reação ofensiva (${goalsInLast3}/3 jogos marcando).`
+    : `Sem sinal forte de recuperação (score ${Math.round(recoveryScore)}).`;
+
   return {
     recent: {
       games: recentRows.length,
@@ -493,6 +558,15 @@ function summarizePlayerDeep(matches: MatchRecord[], nick: string, sampleWindow:
       ppg: recentRows.length ? recentPoints / recentRows.length : 0,
       avgGoalsFor: recentRows.length ? recentGoalsFor / recentRows.length : 0,
       avgGoalsAgainst: recentRows.length ? recentGoalsAgainst / recentRows.length : 0,
+    },
+    recovery: {
+      score: recoveryScore,
+      signal: recoverySignal,
+      lossStreak,
+      goalsInLast3,
+      ppgLast3,
+      ppgPrev3,
+      reason: recoveryReason,
     },
     topTeamsByPoints,
     worstTeamsByConceded,
@@ -511,10 +585,12 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
 
     const homeCurrentConceded = homeDeep.currentTeamConceded?.avgConceded ?? 0;
     const awayCurrentConceded = awayDeep.currentTeamConceded?.avgConceded ?? 0;
-    const overAlertActive = homeCurrentConceded >= profile.overAlertGaThreshold && awayCurrentConceded >= profile.overAlertGaThreshold;
+    const overAlertBase = homeCurrentConceded >= profile.overAlertGaThreshold && awayCurrentConceded >= profile.overAlertGaThreshold;
+    const overAlertRecoveryBoost = homeDeep.recovery.signal || awayDeep.recovery.signal;
+    const overAlertActive = overAlertBase && overAlertRecoveryBoost;
     const overAlertReason = overAlertActive
-      ? `Ambos cedem muitos gols no time atual (${homeCurrentConceded.toFixed(2)} e ${awayCurrentConceded.toFixed(2)} GA/j).`
-      : `Sem gatilho forte de over pelos times atuais (${homeCurrentConceded.toFixed(2)} e ${awayCurrentConceded.toFixed(2)} GA/j).`;
+      ? `Ambos cedem muitos gols no time atual (${homeCurrentConceded.toFixed(2)} e ${awayCurrentConceded.toFixed(2)} GA/j) e há sinal de recuperação ofensiva.`
+      : `Sem gatilho forte de over completo: defesa (${homeCurrentConceded.toFixed(2)} / ${awayCurrentConceded.toFixed(2)} GA/j) + recuperação.`;
 
     const homeNickNorm = normalizeText(fixture.homeNick);
     const awayNickNorm = normalizeText(fixture.awayNick);
@@ -639,6 +715,8 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
       `Amostra: ${home.games} jogos (${fixture.homeNick}) e ${away.games} jogos (${fixture.awayNick}) na base local.`,
       `H2H recente: ${h2hRows.length} partidas usadas para ajuste de confronto direto.`,
       `Últimos ${sampleWindow}: ${fixture.homeNick} ${homeDeep.recent.points} pts (${homeDeep.recent.wins}V/${homeDeep.recent.draws}E/${homeDeep.recent.losses}D) vs ${fixture.awayNick} ${awayDeep.recent.points} pts (${awayDeep.recent.wins}V/${awayDeep.recent.draws}E/${awayDeep.recent.losses}D).`,
+      `${fixture.homeNick} recuperação: ${Math.round(homeDeep.recovery.score)} (${homeDeep.recovery.reason})`,
+      `${fixture.awayNick} recuperação: ${Math.round(awayDeep.recovery.score)} (${awayDeep.recovery.reason})`,
       overAlertReason,
       `Média esperada de gols: ${expectedGoals.toFixed(2)}.`,
     ];
@@ -673,6 +751,7 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
 }
 
 export default function AnaliseJogosPage() {
+  const router = useRouter();
   const [rawInput, setRawInput] = useState(DEFAULT_INPUT);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -818,6 +897,8 @@ export default function AnaliseJogosPage() {
     if (item.overAlert.active) curiosities.push("Sinal de jogo aberto: OVER ALERTA ativo nos times atuais.");
     if (item.homeDeep.recent.ppg >= 2) curiosities.push(`${item.fixture.homeNick} em fase forte no recorte (${item.homeDeep.recent.ppg.toFixed(2)} PPG).`);
     if (item.awayDeep.recent.ppg >= 2) curiosities.push(`${item.fixture.awayNick} em fase forte no recorte (${item.awayDeep.recent.ppg.toFixed(2)} PPG).`);
+    if (item.homeDeep.recovery.signal) curiosities.push(`${item.fixture.homeNick} com sinal de recuperação (${Math.round(item.homeDeep.recovery.score)}/100).`);
+    if (item.awayDeep.recovery.signal) curiosities.push(`${item.fixture.awayNick} com sinal de recuperação (${Math.round(item.awayDeep.recovery.score)}/100).`);
     if (item.homeDeep.recent.avgGoalsAgainst >= 1.8 || item.awayDeep.recent.avgGoalsAgainst >= 1.8) curiosities.push("Defesa vulnerável no recorte recente (GA/j elevado)." );
     if (!curiosities.length) curiosities.push("Sem anomalia forte; cenário mais equilibrado no recorte atual.");
     return curiosities;
@@ -848,18 +929,61 @@ export default function AnaliseJogosPage() {
       });
   }
 
+  function goToH2hWithDetail(item: MatchInsight) {
+    const query = new URLSearchParams({
+      playerA: item.fixture.homeNick,
+      playerB: item.fixture.awayNick,
+      teamA: item.fixture.homeTeam,
+      teamB: item.fixture.awayTeam,
+      tab: "analise",
+    });
+
+    router.push(`/h2h?${query.toString()}`);
+  }
+
+  function buildDirectSummary(item: MatchInsight) {
+    const homeAttack = item.homeDeep.recent.avgGoalsFor;
+    const homeDefense = item.homeDeep.recent.avgGoalsAgainst;
+    const awayAttack = item.awayDeep.recent.avgGoalsFor;
+    const awayDefense = item.awayDeep.recent.avgGoalsAgainst;
+
+    const attackGap = homeAttack - awayAttack;
+    const defenseGap = awayDefense - homeDefense;
+    const trendScore = (attackGap * 0.6 + defenseGap * 0.4) * 10;
+
+    let bestScenario = "Jogo equilibrado";
+    if (item.overAlert.active && item.expectedGoals >= 3) bestScenario = "Melhor cenário: over gols";
+    else if (item.pick === "Casa" && item.homeProb >= 0.5) bestScenario = "Melhor cenário: casa com proteção";
+    else if (item.pick === "Fora" && item.awayProb >= 0.5) bestScenario = "Melhor cenário: fora com proteção";
+    else if (item.pick === "Empate" || item.drawProb >= 0.3) bestScenario = "Melhor cenário: evitar risco alto / empate vivo";
+
+    return {
+      attackGap,
+      defenseGap,
+      trendScore,
+      bestScenario,
+    };
+  }
+
   return (
     <div className="pageGrid">
       <Card className="col-12">
         <CardHeader>
           <div>
-            <h3>Análise por Texto Colado</h3>
-            <small>Cole os jogos no formato BetsAPI e o sistema cruza com seu IndexedDB para sugerir vencedor e mercados.</small>
+            <h3>Análise simples dos jogos</h3>
+            <small>Cole os jogos e o sistema mostra quem tem mais chance de ganhar e se vale olhar over/under.</small>
           </div>
-          <Badge tone="warn">Módulo experimental</Badge>
+          <Badge tone="warn">Em testes</Badge>
         </CardHeader>
         <CardBody>
           <div style={{ display: "grid", gap: 10 }}>
+            <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
+              <span className="mini"><strong>? Palpite</strong> = lado com maior chance (Casa, Empate ou Fora).</span>
+              <span className="mini"><strong>? Força do palpite</strong> = nota de 0 a 100. Quanto maior, melhor.</span>
+              <span className="mini"><strong>? Vantagem na odd</strong> = quando sua chance estimada é melhor que a odd da casa.</span>
+              <span className="mini"><strong>? Alerta de over</strong> = sinal de jogo mais aberto, com chance maior de gols.</span>
+            </div>
+
             <textarea
               value={rawInput}
               onChange={(event) => setRawInput(event.target.value)}
@@ -898,7 +1022,7 @@ export default function AnaliseJogosPage() {
                 <option value={20}>Últimos 20 jogos</option>
               </select>
               <Button variant="primary" disabled={!canRun || loading} onClick={runAnalysis}>
-                {loading ? "Analisando..." : "Analisar jogos"}
+                {loading ? "Lendo e analisando..." : "Analisar jogos"}
               </Button>
               <Button disabled={!insights.length || saving} onClick={saveToHistory}>
                 {saving ? "Salvando..." : "Salvar no histórico"}
@@ -933,8 +1057,8 @@ export default function AnaliseJogosPage() {
         <Card className="col-12">
           <CardHeader>
             <div>
-              <h3>Resultado da análise</h3>
-              <small>Probabilidades, confiança e mercados derivados para cada jogo colado.</small>
+              <h3>Resultado dos jogos</h3>
+              <small>Veja quem está mais forte no confronto e se existe vantagem na odd.</small>
             </div>
           </CardHeader>
           <CardBody>
@@ -946,11 +1070,11 @@ export default function AnaliseJogosPage() {
                   <th className="right">Casa</th>
                   <th className="right">Empate</th>
                   <th className="right">Fora</th>
-                  <th>Pick</th>
+                  <th>Palpite</th>
                   <th>Confiança</th>
-                  <th className="right">Score</th>
-                  <th>Value</th>
-                  <th className="right">xG Total</th>
+                  <th className="right">Força</th>
+                  <th>Vantagem</th>
+                  <th className="right">Expectativa de gols</th>
                   <th>Ações</th>
                 </tr>
               </thead>
@@ -969,7 +1093,7 @@ export default function AnaliseJogosPage() {
                     <td className="right">{(item.awayProb * 100).toFixed(1)}%</td>
                     <td>
                       <Badge tone={item.pick === "Empate" ? "warn" : "good"}>{item.pick}</Badge>
-                      {item.overAlert.active && <span className="badge warn" style={{ marginLeft: 6 }}>OVER ALERTA</span>}
+                      {item.overAlert.active && <span className="badge warn" style={{ marginLeft: 6 }}>ALERTA DE OVER</span>}
                     </td>
                     <td>
                       <Badge tone={item.confidence === "alta" ? "good" : item.confidence === "media" ? "warn" : "bad"}>
@@ -979,9 +1103,9 @@ export default function AnaliseJogosPage() {
                     <td className="right">{Math.round(item.confidenceScore)}</td>
                     <td>
                       {item.valueEdgePp == null ? (
-                        <span className="mini">sem odd</span>
+                        <span className="mini">odd não informada</span>
                       ) : item.isValueBet ? (
-                        <span className="badge good">VALUE +{item.valueEdgePp.toFixed(1)}pp</span>
+                        <span className="badge good">VANTAGEM +{item.valueEdgePp.toFixed(1)}pp</span>
                       ) : (
                         <span className="badge">{item.valueEdgePp.toFixed(1)}pp</span>
                       )}
@@ -1002,8 +1126,8 @@ export default function AnaliseJogosPage() {
         <Card className="col-12">
           <CardHeader>
             <div>
-              <h3>Mercados sugeridos</h3>
-              <small>Over/Under e BTTS com probabilidade estimada e odd justa.</small>
+              <h3>Sugestões de mercado</h3>
+              <small>Linhas de over/under e ambas marcam, com chance estimada e odd justa.</small>
             </div>
           </CardHeader>
           <CardBody>
@@ -1032,8 +1156,8 @@ export default function AnaliseJogosPage() {
         <Card className="col-12">
           <CardHeader>
             <div>
-              <h3>Raio-X jogadores (últimos 10 + melhores times)</h3>
-              <small>Para cada confronto: forma dos últimos {sampleWindow} jogos e os times em que cada jogador mais pontua.</small>
+              <h3>Resumo dos jogadores</h3>
+              <small>Mostra forma nos últimos {sampleWindow} jogos e em quais times cada jogador rende melhor.</small>
             </div>
           </CardHeader>
           <CardBody>
@@ -1139,29 +1263,52 @@ export default function AnaliseJogosPage() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 }}>
               <div>
                 <h3 style={{ margin: 0 }}>{detailItem.fixture.homeNick} x {detailItem.fixture.awayNick}</h3>
-                <small className="mini">Recorte atual: últimos {sampleWindow} jogos</small>
+                <small className="mini">Detalhe completo usando os últimos {sampleWindow} jogos</small>
               </div>
-              <Button onClick={() => setDetailItem(null)}>Fechar</Button>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <Button variant="primary" onClick={() => goToH2hWithDetail(detailItem)}>Ir para confronto</Button>
+                <Button onClick={() => setDetailItem(null)}>Fechar</Button>
+              </div>
             </div>
 
             <div style={{ display: "grid", gap: 10 }}>
+              {(() => {
+                const summary = buildDirectSummary(detailItem);
+                return (
+                  <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
+                    <span className="mini"><strong>? Comparativo direto:</strong> Ataque {detailItem.fixture.homeNick} vs {detailItem.fixture.awayNick}: {summary.attackGap >= 0 ? "+" : ""}{summary.attackGap.toFixed(2)} gol/j.</span>
+                    <span className="mini"><strong>? Defesa comparada:</strong> vantagem defensiva estimada {summary.defenseGap >= 0 ? "+" : ""}{summary.defenseGap.toFixed(2)}.</span>
+                    <span className="mini"><strong>? Tendência geral:</strong> {summary.trendScore >= 0 ? "favorável" : "cautela"} ({summary.trendScore.toFixed(1)}).</span>
+                    <span className="mini"><strong>? Cenário sugerido:</strong> {summary.bestScenario}.</span>
+                  </div>
+                );
+              })()}
+
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <span className="badge">Pick: {detailItem.pick}</span>
-                <span className="badge">Score: {Math.round(detailItem.confidenceScore)}</span>
+                <span className="badge">Força: {Math.round(detailItem.confidenceScore)}</span>
                 <span className={`badge ${detailItem.isValueBet ? "good" : "warn"}`}>
-                  {detailItem.valueEdgePp == null ? "Value: sem odd" : `Value: ${detailItem.valueEdgePp.toFixed(1)}pp`}
+                  {detailItem.valueEdgePp == null ? "Vantagem: sem odd" : `Vantagem: ${detailItem.valueEdgePp.toFixed(1)}pp`}
                 </span>
-                <span className={`badge ${detailItem.overAlert.active ? "warn" : "neutral"}`}>{detailItem.overAlert.active ? "OVER ALERTA" : "Sem over alerta"}</span>
+                <span className={`badge ${detailItem.overAlert.active ? "warn" : "neutral"}`}>{detailItem.overAlert.active ? "ALERTA DE OVER" : "Sem alerta de over"}</span>
+              </div>
+
+              <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
+                <span className="mini"><strong>? O que é força?</strong> Nota da qualidade do palpite.</span>
+                <span className="mini"><strong>? O que é vantagem?</strong> Quanto a sua previsão está melhor que a odd da casa.</span>
+                <span className="mini"><strong>? O que é recuperação?</strong> Sinal de reação após fase ruim (tendência de voltar a marcar).</span>
               </div>
 
               <div className="row" style={{ alignItems: "flex-start" }}>
                 <div style={{ flex: 1 }}>
                   <strong>{detailItem.fixture.homeNick}</strong>
                   <div className="mini">{detailItem.homeDeep.recent.wins}V/{detailItem.homeDeep.recent.draws}E/{detailItem.homeDeep.recent.losses}D • {detailItem.homeDeep.recent.points} pts • PPG {detailItem.homeDeep.recent.ppg.toFixed(2)}</div>
+                  <div className="mini">Recuperação: {Math.round(detailItem.homeDeep.recovery.score)}/100 • {detailItem.homeDeep.recovery.signal ? "sinal ativo" : "sem sinal"}</div>
                 </div>
                 <div style={{ flex: 1 }}>
                   <strong>{detailItem.fixture.awayNick}</strong>
                   <div className="mini">{detailItem.awayDeep.recent.wins}V/{detailItem.awayDeep.recent.draws}E/{detailItem.awayDeep.recent.losses}D • {detailItem.awayDeep.recent.points} pts • PPG {detailItem.awayDeep.recent.ppg.toFixed(2)}</div>
+                  <div className="mini">Recuperação: {Math.round(detailItem.awayDeep.recovery.score)}/100 • {detailItem.awayDeep.recovery.signal ? "sinal ativo" : "sem sinal"}</div>
                 </div>
               </div>
 
@@ -1204,7 +1351,7 @@ export default function AnaliseJogosPage() {
               </div>
 
               <div>
-                <strong>Curiosidades e leitura assertiva</strong>
+                <strong>Leitura rápida (direta)</strong>
                 <ul style={{ margin: "8px 0 0 18px", padding: 0, display: "grid", gap: 6 }}>
                   {buildCuriosities(detailItem).map((note) => (
                     <li key={note} className="mini">{note}</li>
