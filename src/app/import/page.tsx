@@ -2,12 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { z } from "zod";
 import { db } from "@/lib/db";
 import { buildDashboardData } from "@/lib/analytics";
 import { buildCacheKey, normalizeKeyPart } from "@/lib/cache-keys";
 import { buildDatasetVersion } from "@/lib/dataset-version";
 import { resolvePendingPredictions } from "@/lib/prediction-ledger";
 import { downloadTemplate, parseRawTextMatches, parseWorkbook, readWorkbook, validateWorkbook, type ParsedImportData } from "@/lib/excel";
+import { reportError, toErrorMessage } from "@/lib/errors";
 import type { ImportSummary, MatchRecord, Odds1X2Record, OddsOuRecord, PlayerMapRecord, UpcomingRecord } from "@/lib/types";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -30,6 +32,22 @@ type ImportQualityGate = {
   leagueCount: number;
   spanDays: number;
 };
+
+const rawTextImportSchema = z.object({
+  rawText: z.string({ message: "Cole o texto bruto antes de importar." }).trim().min(10, "Texto muito curto; cole mais linhas."),
+  rawLeague: z.string({ message: "Informe a liga." }).trim().min(1, "Informe a liga.").max(60, "Liga muito longa."),
+  rawYear: z
+    .string({ message: "Informe o ano." })
+    .trim()
+    .regex(/^\d{4}$/, "Ano inválido (use 4 dígitos, ex: 2026).")
+    .transform((value) => Number(value))
+    .refine((value) => Number.isFinite(value) && value >= 2000 && value <= 2100, "Ano fora do intervalo (2000–2100)."),
+});
+
+const excelFileSchema = z.object({
+  name: z.string().refine((value) => value.toLowerCase().endsWith(".xlsx"), "Arquivo inválido: selecione um .xlsx"),
+  size: z.number().refine((value) => value > 0, "Arquivo vazio.").max(30 * 1024 * 1024, "Arquivo muito grande (máx 30MB)."),
+});
 
 function evaluateImportQuality(parsed: ParsedImportData): ImportQualityGate {
   const matches = parsed.matches;
@@ -473,6 +491,13 @@ export default function ImportPage() {
     setStep(1);
 
     try {
+      const fileCheck = excelFileSchema.safeParse({ name: file.name, size: file.size });
+      if (!fileCheck.success) {
+        setMessage(fileCheck.error.issues[0]?.message ?? "Arquivo inválido.");
+        setLoading(false);
+        return;
+      }
+
       const workbook = await readWorkbook(file);
       setStep(2);
       const errors = validateWorkbook(workbook);
@@ -498,8 +523,9 @@ export default function ImportPage() {
       );
       bumpDataRevision();
       setTimeout(() => router.push("/dashboard"), 900);
-    } catch {
-      setMessage("Falha ao importar o arquivo.");
+    } catch (error) {
+      reportError(error, "import:excel");
+      setMessage(toErrorMessage(error, "Falha ao importar o arquivo."));
     } finally {
       setLoading(false);
     }
@@ -549,9 +575,16 @@ export default function ImportPage() {
     setStep(1);
 
     try {
+      const check = rawTextImportSchema.safeParse({ rawText, rawLeague, rawYear });
+      if (!check.success) {
+        setMessage(check.error.issues[0]?.message ?? "Campos inválidos.");
+        setLoading(false);
+        return;
+      }
+
       const parsed = parseRawTextMatches(rawText, {
         league: rawLeague,
-        referenceYear: Number(rawYear),
+        referenceYear: check.data.rawYear,
       });
 
       if (!parsed.matches.length) {
@@ -574,8 +607,9 @@ export default function ImportPage() {
       );
       bumpDataRevision();
       setTimeout(() => router.push("/dashboard"), 900);
-    } catch {
-      setMessage("Falha ao importar texto bruto.");
+    } catch (error) {
+      reportError(error, "import:rawText", { rawLeague, rawYear });
+      setMessage(toErrorMessage(error, "Falha ao importar texto bruto."));
     } finally {
       setLoading(false);
     }
@@ -583,9 +617,16 @@ export default function ImportPage() {
 
   const handleRawPreview = () => {
     try {
+      const check = rawTextImportSchema.safeParse({ rawText, rawLeague, rawYear });
+      if (!check.success) {
+        setRawPreview(null);
+        setMessage(check.error.issues[0]?.message ?? "Campos inválidos.");
+        return;
+      }
+
       const parsed = parseRawTextMatches(rawText, {
         league: rawLeague,
-        referenceYear: Number(rawYear),
+        referenceYear: check.data.rawYear,
       });
 
       if (!parsed.matches.length) {
@@ -596,9 +637,10 @@ export default function ImportPage() {
 
       setRawPreview(parsed);
       setMessage(`Prévia pronta: ${parsed.matches.length} jogos válidos (${parsed.importSummary.linesRemoved} removidos).`);
-    } catch {
+    } catch (error) {
+      reportError(error, "import:rawPreview", { rawLeague, rawYear });
       setRawPreview(null);
-      setMessage("Falha ao gerar prévia do texto bruto.");
+      setMessage(toErrorMessage(error, "Falha ao gerar prévia do texto bruto."));
     }
   };
 

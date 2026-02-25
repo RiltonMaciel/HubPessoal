@@ -281,7 +281,8 @@ export type PredictionLedgerRecord = {
   datasetVersion?: string | null;
   modelVersion: string;
   presetId: string;
-  routeContext: "dashboard" | "h2h" | "aovivo";
+  routeContext: "dashboard" | "h2h" | "aovivo" | "analise-jogos";
+  scheduledAtLabel?: string;
   matchKey: string;
   league?: string;
   market: string;
