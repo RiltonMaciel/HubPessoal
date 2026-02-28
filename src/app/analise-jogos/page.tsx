@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import { db } from "@/lib/db";
 import { applyAliasesToMatches, getAliasMap } from "@/lib/aliases";
 import { logPrediction } from "@/lib/prediction-ledger";
@@ -751,7 +750,6 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
 }
 
 export default function AnaliseJogosPage() {
-  const router = useRouter();
   const [rawInput, setRawInput] = useState(DEFAULT_INPUT);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -763,6 +761,7 @@ export default function AnaliseJogosPage() {
   const [mode, setMode] = useState<AnalysisMode>("conservador");
   const [sampleWindow, setSampleWindow] = useState<SampleWindow>(10);
   const [detailItem, setDetailItem] = useState<MatchInsight | null>(null);
+  const [copyMessage, setCopyMessage] = useState("");
   const [analysisMatches, setAnalysisMatches] = useState<MatchRecord[]>([]);
 
   const canRun = useMemo(() => rawInput.trim().length > 0, [rawInput]);
@@ -938,7 +937,11 @@ export default function AnaliseJogosPage() {
       tab: "analise",
     });
 
-    router.push(`/h2h?${query.toString()}`);
+    const url = `/h2h?${query.toString()}`;
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      window.location.href = url;
+    }
   }
 
   function buildDirectSummary(item: MatchInsight) {
@@ -963,6 +966,72 @@ export default function AnaliseJogosPage() {
       trendScore,
       bestScenario,
     };
+  }
+
+  function buildRiskSignal(item: MatchInsight) {
+    const confidence = clamp(item.confidenceScore, 0, 100);
+    const balance = 1 - Math.abs(item.homeProb - item.awayProb);
+    const riskScore =
+      (100 - confidence) * 0.55 +
+      item.drawProb * 100 * 0.25 +
+      clamp(balance, 0, 1) * 100 * 0.2;
+
+    if (riskScore <= 33) {
+      return {
+        label: "Risco baixo",
+        toneClass: "good",
+        reason: "Leitura mais estável para esse jogo.",
+      };
+    }
+
+    if (riskScore <= 66) {
+      return {
+        label: "Risco médio",
+        toneClass: "warn",
+        reason: "Jogo com sinais mistos; usar proteção.",
+      };
+    }
+
+    return {
+      label: "Risco alto",
+      toneClass: "bad",
+      reason: "Cenário bem instável; stake menor.",
+    };
+  }
+
+  function buildWhySuggestion(item: MatchInsight) {
+    const mainReasons = item.reasons.slice(0, 3);
+    if (mainReasons.length === 3) return mainReasons;
+
+    const fallback = [
+      `Forma recente: ${item.fixture.homeNick} ${item.homeDeep.recent.ppg.toFixed(2)} PPG vs ${item.awayDeep.recent.ppg.toFixed(2)} PPG de ${item.fixture.awayNick}.`,
+      `Probabilidades estimadas: Casa ${(item.homeProb * 100).toFixed(1)}% | Empate ${(item.drawProb * 100).toFixed(1)}% | Fora ${(item.awayProb * 100).toFixed(1)}%.`,
+      item.overAlert.active ? "Existe sinal de jogo aberto (alerta de over ativo)." : "Sem sinal forte de over neste confronto.",
+    ];
+
+    return [...mainReasons, ...fallback].slice(0, 3);
+  }
+
+  function buildShareSummary(item: MatchInsight) {
+    const risk = buildRiskSignal(item);
+    return [
+      `${item.fixture.homeNick} x ${item.fixture.awayNick} (${item.fixture.homeTeam} x ${item.fixture.awayTeam})`,
+      `Palpite: ${item.pick} | Força: ${Math.round(item.confidenceScore)} | ${risk.label}`,
+      `Prob.: Casa ${(item.homeProb * 100).toFixed(1)}% | Empate ${(item.drawProb * 100).toFixed(1)}% | Fora ${(item.awayProb * 100).toFixed(1)}%`,
+      item.valueEdgePp == null ? "Vantagem: sem odd informada" : `Vantagem: ${item.valueEdgePp.toFixed(1)}pp`,
+      `Over alert: ${item.overAlert.active ? "sim" : "não"} | Cenário: ${buildDirectSummary(item).bestScenario}`,
+    ].join("\n");
+  }
+
+  async function copyDetailSummary(item: MatchInsight) {
+    try {
+      await navigator.clipboard.writeText(buildShareSummary(item));
+      setCopyMessage("Resumo copiado.");
+    } catch {
+      setCopyMessage("Não deu para copiar agora.");
+    }
+
+    window.setTimeout(() => setCopyMessage(""), 2200);
   }
 
   return (
@@ -1255,6 +1324,11 @@ export default function AnaliseJogosPage() {
           aria-modal="true"
           aria-label="Detalhes do jogo"
         >
+          {(() => {
+            const risk = buildRiskSignal(detailItem);
+            const whyLines = buildWhySuggestion(detailItem);
+
+            return (
           <div
             className="card"
             style={{ width: "min(980px, 100%)", maxHeight: "90vh", overflow: "auto", padding: 16 }}
@@ -1267,9 +1341,12 @@ export default function AnaliseJogosPage() {
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Button variant="primary" onClick={() => goToH2hWithDetail(detailItem)}>Ir para confronto</Button>
+                <Button onClick={() => copyDetailSummary(detailItem)}>Copiar resumo</Button>
                 <Button onClick={() => setDetailItem(null)}>Fechar</Button>
               </div>
             </div>
+
+            {!!copyMessage && <div className="mini" style={{ marginBottom: 10 }}>{copyMessage}</div>}
 
             <div style={{ display: "grid", gap: 10 }}>
               {(() => {
@@ -1287,10 +1364,21 @@ export default function AnaliseJogosPage() {
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <span className="badge">Pick: {detailItem.pick}</span>
                 <span className="badge">Força: {Math.round(detailItem.confidenceScore)}</span>
+                <span className={`badge ${risk.toneClass}`}>{risk.label}</span>
                 <span className={`badge ${detailItem.isValueBet ? "good" : "warn"}`}>
                   {detailItem.valueEdgePp == null ? "Vantagem: sem odd" : `Vantagem: ${detailItem.valueEdgePp.toFixed(1)}pp`}
                 </span>
                 <span className={`badge ${detailItem.overAlert.active ? "warn" : "neutral"}`}>{detailItem.overAlert.active ? "ALERTA DE OVER" : "Sem alerta de over"}</span>
+              </div>
+
+              <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
+                <span className="mini"><strong>? Semáforo de risco:</strong> {risk.reason}</span>
+                <span className="mini"><strong>? Por que da sugestão:</strong></span>
+                <ul style={{ margin: "0 0 0 18px", padding: 0, display: "grid", gap: 6 }}>
+                  {whyLines.map((line) => (
+                    <li key={line} className="mini">{line}</li>
+                  ))}
+                </ul>
               </div>
 
               <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
@@ -1363,6 +1451,8 @@ export default function AnaliseJogosPage() {
               </div>
             </div>
           </div>
+            );
+          })()}
         </div>
       )}
 

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { collectBetsApiMatches } from "@/lib/betsapi";
+import { collectBetsApiMatches, isLikelyBetsApiLeagueUrl } from "@/lib/betsapi";
 
 type ExportBody = {
   url?: string;
@@ -25,6 +25,16 @@ export async function POST(request: Request) {
 
     if (!/^https?:\/\//i.test(url)) {
       return NextResponse.json({ error: "A URL precisa começar com http:// ou https://." }, { status: 400 });
+    }
+
+    if (!isLikelyBetsApiLeagueUrl(url)) {
+      return NextResponse.json(
+        {
+          error:
+            "URL inválida para coleta. Use a URL da liga no BetsAPI (ex.: https://betsapi.com/le/37298/Esoccer-H2H-GG-League--8-mins-play).",
+        },
+        { status: 400 }
+      );
     }
 
     if (Number.isNaN(rawMaxPages) || rawMaxPages < 1 || rawMaxPages > 5000) {
@@ -55,7 +65,11 @@ export async function POST(request: Request) {
       lines: result.lines,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Erro inesperado ao processar BetsAPI.";
+    let message = error instanceof Error ? error.message : "Erro inesperado ao processar BetsAPI.";
+    if (/\bHTTP\s*403\b/i.test(message)) {
+      message =
+        "BetsAPI retornou HTTP 403 (Cloudflare/anti-bot). Cole o cf_clearance atualizado ou o cookie completo (sem atributos como Path/Domain).";
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

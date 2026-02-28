@@ -31,6 +31,52 @@ type BetsApiFetchOptions = {
   maxMatches?: number;
 };
 
+export function isLikelyBetsApiLeagueUrl(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!/(^|\.)betsapi\.com$/i.test(parsed.hostname)) return false;
+    const path = parsed.pathname.replace(/\/+$/, "");
+    return /\/(l|le|ls|fi)\/\d+(?:\/|$)/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCookieHeader(value?: string) {
+  const raw = (value ?? "").trim().replace(/^cookie\s*:\s*/i, "").replace(/[\r\n]+/g, " ").trim();
+  if (!raw) return "";
+
+  const ignored = new Set([
+    "path",
+    "domain",
+    "expires",
+    "max-age",
+    "secure",
+    "httponly",
+    "samesite",
+    "priority",
+    "partitioned",
+    "version",
+  ]);
+
+  const pairs = raw
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const eq = part.indexOf("=");
+      if (eq <= 0) return null;
+      const key = part.slice(0, eq).trim();
+      const val = part.slice(eq + 1).trim();
+      if (!key || !val) return null;
+      if (ignored.has(key.toLowerCase())) return null;
+      return `${key}=${val}`;
+    })
+    .filter((item): item is string => Boolean(item));
+
+  return pairs.join("; ");
+}
+
 function buildBrowserHeaders(extra?: Record<string, string>) {
   return {
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -401,6 +447,7 @@ function parseBoardRowsFromHtml(html: string): BetsApiBoardRow[] {
 
 async function fetchBetsApiPage(url: string, options?: BetsApiFetchOptions) {
   let lastError: unknown = null;
+  const normalizedCookie = normalizeCookieHeader(options?.cookie?.trim() || MANUAL_BETSAPI_COOKIE);
 
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt += 1) {
     const controller = new AbortController();
@@ -421,7 +468,7 @@ async function fetchBetsApiPage(url: string, options?: BetsApiFetchOptions) {
           "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
           "cache-control": "no-cache",
           pragma: "no-cache",
-          ...(options?.cookie?.trim() || MANUAL_BETSAPI_COOKIE ? { cookie: (options?.cookie?.trim() || MANUAL_BETSAPI_COOKIE) } : {}),
+          ...(normalizedCookie ? { cookie: normalizedCookie } : {}),
         },
         cache: "no-store",
         redirect: "follow",

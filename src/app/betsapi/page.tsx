@@ -42,15 +42,65 @@ function formatCompetitionLabel(value: string) {
   }
 }
 
+function sanitizeCookieHeader(value: string) {
+  const cleaned = value
+    .trim()
+    .replace(/^cookie\s*:\s*/i, "")
+    .replace(/[\r\n]+/g, " ")
+    .trim();
+
+  if (!cleaned) return "";
+
+  const ignored = new Set([
+    "path",
+    "domain",
+    "expires",
+    "max-age",
+    "secure",
+    "httponly",
+    "samesite",
+    "priority",
+    "partitioned",
+    "version",
+  ]);
+
+  const parts = cleaned
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const eq = part.indexOf("=");
+      if (eq <= 0) return null;
+      const key = part.slice(0, eq).trim();
+      const val = part.slice(eq + 1).trim();
+      if (!key || !val) return null;
+      if (ignored.has(key.toLowerCase())) return null;
+      return `${key}=${val}`;
+    })
+    .filter((item): item is string => Boolean(item));
+
+  return parts.join("; ");
+}
+
+function extractCfClearanceValue(raw: string) {
+  const cleaned = raw.trim().replace(/^cookie\s*:\s*/i, "");
+  if (!cleaned) return "";
+
+  const match = cleaned.match(/(?:^|[;\s])cf_clearance\s*=\s*([^;\s]+)/i);
+  if (match?.[1]) return match[1].trim();
+
+  if (!/[;=\s]/.test(cleaned)) return cleaned;
+  return "";
+}
+
 function buildCookieHeaderFromClearance(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  if (/\bcf_clearance\s*=/.test(trimmed)) return trimmed;
-  return `cf_clearance=${trimmed}`;
+  const token = extractCfClearanceValue(value);
+  if (!token) return undefined;
+  return `cf_clearance=${token}`;
 }
 
 function buildCookieHeader(clearanceValue: string, cookieFull: string) {
-  const full = cookieFull.trim();
+  const full = sanitizeCookieHeader(cookieFull);
   if (full) return full;
   return buildCookieHeaderFromClearance(clearanceValue);
 }
