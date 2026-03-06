@@ -6,7 +6,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useAppStore } from "@/store/appStore";
 
 const links = [
-  { section: "Analytics", items: [{ href: "/import", label: "📥 Importar" }, { href: "/dashboard", label: "📊 Dashboard" }, { href: "/aovivo", label: "🟢 AoVivo" }, { href: "/h2h", label: "🤝 Confronto" }, { href: "/auditoria", label: "📈 Auditoria" }, { href: "/betsapi", label: "🕸️ BetsAPI" }, { href: "/transmissao", label: "📺 Transmissão" }, { href: "/player/MJ", label: "👤 Player" }] },
+  { section: "Analytics", items: [{ href: "/import", label: "📥 Importar" }, { href: "/dashboard", label: "📊 Dashboard" }, { href: "/aovivo", label: "🟢 AoVivo" }, { href: "/h2h", label: "🤝 Confronto" }, { href: "/monitor-h2h", label: "⏱️ Monitor H2H" }, { href: "/auditoria", label: "📈 Auditoria" }, { href: "/analise-jogos", label: "🧠 Análise Jogos" }, { href: "/betsapi", label: "🕸️ BetsAPI" }, { href: "/transmissao", label: "📺 Transmissão" }, { href: "/player/MJ", label: "👤 Player" }] },
   { section: "Organização", items: [{ href: "/notes", label: "📝 Notas" }, { href: "/calendar", label: "🗓️ Calendário" }] },
   { section: "Privado", items: [{ href: "/secure", label: "🔒 Secure" }] },
 ];

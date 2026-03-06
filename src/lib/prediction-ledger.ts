@@ -61,6 +61,7 @@ export type LogPredictionArgs = {
   modelVersion?: string;
   presetId: string;
   routeContext: PredictionLedgerRecord["routeContext"];
+  scheduledAtLabel?: string;
   match: Pick<MatchRecord, "dateTime" | "league" | "homeNick" | "awayNick"> | Pick<UpcomingRecord, "dateTime" | "league" | "homeNick" | "awayNick">;
   market: string;
   pRaw: number;
@@ -99,6 +100,7 @@ export async function logPrediction(args: LogPredictionArgs) {
     modelVersion: args.modelVersion ?? "model:v1",
     presetId: args.presetId,
     routeContext: args.routeContext,
+    scheduledAtLabel: args.scheduledAtLabel,
     matchKey,
     league: args.match.league,
     market: args.market,

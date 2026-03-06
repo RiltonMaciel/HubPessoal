@@ -28,7 +28,7 @@ const HELP = {
   page:
     "Esta página é uma auditoria OFFLINE das previsões geradas pelo app.\n\nO que você consegue medir aqui:\n- Quantas previsões foram feitas (Total).\n- Quantas já têm resultado conhecido (Resolvidos).\n- Performance real: Hit-rate e Brier (apenas nos pontuáveis).\n\nRegras importantes:\n- Hit-rate e Brier só fazem sentido quando há 'outcome' (resultado) salvo no ledger.\n- 'pCal' é a probabilidade calibrada (0..1).\n- Threshold atual para virar 'Sim' vs 'Não': pCal >= 0.50.\n\nExemplo rápido:\n- Mercado ou6.5, pCal=0.72 => previsão 'Over'.\n- Resultado total=8 => hit=✓.\n- Resultado total=4 => hit=✗.",
   context:
-    "Contexto (Ctx) indica de onde a previsão foi gerada:\n- dashboard: recomendações do Command Center\n- h2h: confronto direto\n- aovivo: monitor ao vivo\n\nExemplo: se você filtra 'aovivo', você avalia somente decisões tomadas ao vivo.",
+    "Contexto (Ctx) indica de onde a previsão foi gerada:\n- dashboard: recomendações do Command Center\n- h2h: confronto direto\n- aovivo: monitor ao vivo\n- analise-jogos: jogos colados manualmente\n\nExemplo: se você filtra 'aovivo', você avalia somente decisões tomadas ao vivo.",
   decision:
     "Decisão é a classificação final do sistema para aquela previsão:\n- APOSTAVEL: passou gates (amostra, edge, drift, confiabilidade, etc.)\n- CAUTELA: sinal existe, mas é frágil (stake menor / aguardar)\n- EVITAR: sinal bloqueado (risco alto / ruído / baixa confiabilidade)\n- SEM_SINAL: neutro\n\nDica: a auditoria fica mais honesta filtrando 'APOSTAVEL' e comparando com o resto.",
   market:
@@ -279,6 +279,7 @@ export default function AuditoriaPage() {
               <option value="dashboard">dashboard</option>
               <option value="h2h">h2h</option>
               <option value="aovivo">aovivo</option>
+              <option value="analise-jogos">analise-jogos</option>
               </Select>
             </div>
 

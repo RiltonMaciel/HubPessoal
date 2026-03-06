@@ -63,3 +63,13 @@ export function lastMatchesWithTeam(matches: MatchRecord[], nick: string, teamQu
     .sort((a, b) => toTs(b.dateTime) - toTs(a.dateTime))
     .slice(0, Math.max(0, limit));
 }
+
+export function lastMatchesForPlayer(matches: MatchRecord[], nick: string, limit = 10) {
+  const n = normalize(nick);
+  if (!n || !matches.length) return [] as MatchRecord[];
+
+  return matches
+    .filter((match) => getPlayerSide(match, n) != null)
+    .sort((a, b) => toTs(b.dateTime) - toTs(a.dateTime))
+    .slice(0, Math.max(0, limit));
+}

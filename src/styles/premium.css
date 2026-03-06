@@ -189,6 +189,92 @@ select option:checked{
 .fc .fc-event-premium{background:linear-gradient(135deg,rgba(124,92,255,.45),rgba(79,140,255,.32));border:1px solid rgba(124,92,255,.5)}
 .fc .fc-holiday{background:rgba(255,176,32,.2)!important;border:1px solid rgba(255,176,32,.5)!important;color:#ffe0a0!important}
 
+.fc-premium-overlay{
+  position:fixed;
+  inset:0;
+  z-index:10000;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  background:radial-gradient(circle at center,rgba(15,23,42,.4) 0%,rgba(2,6,23,.8) 100%);
+  backdrop-filter:blur(40px) saturate(180%);
+  -webkit-backdrop-filter:blur(40px) saturate(180%);
+}
+
+.ball-stage{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+}
+
+.premium-ball{
+  width:90px;
+  height:90px;
+  background:#fff;
+  border-radius:50%;
+  position:relative;
+  overflow:hidden;
+  box-shadow:
+    inset -15px -15px 30px rgba(0,0,0,.3),
+    inset 10px 10px 20px rgba(255,255,255,.8),
+    0 10px 40px rgba(0,0,0,.4);
+  animation:proBounce .7s cubic-bezier(.45,.05,.55,.95) infinite alternate;
+}
+
+.ball-texture{
+  position:absolute;
+  inset:0;
+  background-image:
+    radial-gradient(circle at 50% 50%,#1a1a1a 20%,transparent 21%),
+    radial-gradient(circle at 0% 0%,#1a1a1a 20%,transparent 21%),
+    radial-gradient(circle at 100% 0%,#1a1a1a 20%,transparent 21%),
+    radial-gradient(circle at 100% 100%,#1a1a1a 20%,transparent 21%),
+    radial-gradient(circle at 0% 100%,#1a1a1a 20%,transparent 21%);
+  background-size:40px 40px;
+  opacity:.15;
+  animation:ballSpin 2s linear infinite;
+}
+
+.ball-shimmer{
+  position:absolute;
+  top:-100%;
+  left:-100%;
+  width:300%;
+  height:300%;
+  background:linear-gradient(45deg,transparent 45%,rgba(255,255,255,.6) 50%,transparent 55%);
+  animation:lightSweep 1.4s infinite;
+}
+
+.dynamic-shadow{
+  width:60px;
+  height:12px;
+  background:rgba(0,0,0,.4);
+  border-radius:50%;
+  filter:blur(8px);
+  margin-top:30px;
+  animation:shadowSize .7s cubic-bezier(.45,.05,.55,.95) infinite alternate;
+}
+
+@keyframes proBounce{
+  from{transform:translateY(0) scaleX(1.05) scaleY(.95)}
+  to{transform:translateY(-80px) scaleX(1) scaleY(1)}
+}
+
+@keyframes ballSpin{
+  to{transform:rotate(360deg)}
+}
+
+@keyframes lightSweep{
+  from{transform:translate(-20%,-20%)}
+  to{transform:translate(20%,20%)}
+}
+
+@keyframes shadowSize{
+  from{transform:scale(1.4);opacity:.6;filter:blur(4px)}
+  to{transform:scale(.5);opacity:.1;filter:blur(12px)}
+}
+
 @media (max-width:980px){
   .appShell{grid-template-columns:1fr}
   .sidebar{position:fixed;inset:0 auto 0 0;width:280px;transform:translateX(-105%);transition:transform 220ms ease;z-index:60;background:rgba(11,18,32,.85)}

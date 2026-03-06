@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { collectBetsApiBoard } from "@/lib/betsapi";
+import { collectBetsApiBoard, isLikelyBetsApiLeagueUrl } from "@/lib/betsapi";
 
 type LiveBody = {
   url?: string;
@@ -53,6 +53,16 @@ export async function POST(request: Request) {
 
     if (!/^https?:\/\//i.test(url)) {
       return NextResponse.json({ error: "A URL precisa começar com http:// ou https://." }, { status: 400 });
+    }
+
+    if (!isLikelyBetsApiLeagueUrl(url)) {
+      return NextResponse.json(
+        {
+          error:
+            "URL inválida para AoVivo. Use a URL da liga no BetsAPI (ex.: https://betsapi.com/ls/37298/Esoccer-H2H-GG-League--8-mins-play).",
+        },
+        { status: 400 }
+      );
     }
 
     if (Number.isNaN(rawMaxPages) || rawMaxPages < 1 || rawMaxPages > 5000) {

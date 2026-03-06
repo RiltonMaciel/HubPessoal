@@ -22,7 +22,7 @@ import { Table } from "@/components/ui/Table";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useAppStore } from "@/store/appStore";
 import { buildDerivedSignalIndex, computeDerivedSignals, summarizeTeamAffinity } from "@/lib/derived-signals";
-import { inferMostRecentTeam, lastMatchesWithTeam } from "@/lib/team-history";
+import { inferMostRecentTeam, lastMatchesForPlayer, lastMatchesWithTeam } from "@/lib/team-history";
 
 const lines = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
 const lastNOptions = ["5", "10", "20", "all"] as const;
@@ -135,6 +135,19 @@ type H2hScore = {
   edgeFor: "A" | "B" | "equilibrado";
   level: "favoravel" | "cautela" | "evitar";
   reasons: string[];
+};
+
+type FormSummary = {
+  games: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  gf: number;
+  ga: number;
+  ppg: number;
+  avgTotal: number;
+  overRate: number;
+  bttsRate: number;
 };
 
 function normalize(value: string) {
@@ -300,6 +313,36 @@ function buildPlayerStats(matches: MatchRecord[], nick: string, line: number): P
   }
 
   return stats;
+}
+
+function toFormSummary(stats: PlayerStats | null): FormSummary {
+  if (!stats) {
+    return {
+      games: 0,
+      wins: 0,
+      draws: 0,
+      losses: 0,
+      gf: 0,
+      ga: 0,
+      ppg: 0,
+      avgTotal: 0,
+      overRate: 0,
+      bttsRate: 0,
+    };
+  }
+
+  return {
+    games: stats.games,
+    wins: stats.wins,
+    draws: stats.draws,
+    losses: stats.losses,
+    gf: stats.gf,
+    ga: stats.ga,
+    ppg: stats.ppg,
+    avgTotal: stats.avgTotal,
+    overRate: stats.overRate,
+    bttsRate: stats.bttsRate,
+  };
 }
 
 function aggregateAgainstOpponents(
@@ -476,6 +519,7 @@ export default function HeadToHeadPage() {
   const [activeTab, setActiveTab] = useState<H2hTab>("analise");
   const [uploadPlayer, setUploadPlayer] = useState("");
   const [uploadLeague, setUploadLeague] = useState("H2H-Extra");
+  const [last10LeagueOnly, setLast10LeagueOnly] = useState(false);
   const [uploadYear, setUploadYear] = useState(String(new Date().getFullYear()));
   const [uploadText, setUploadText] = useState("");
   const [uploadMessage, setUploadMessage] = useState("");
@@ -487,20 +531,51 @@ export default function HeadToHeadPage() {
   useEffect(() => {
     // Carrega último confronto e histórico de pesquisas.
     try {
-      const rawLast = window.localStorage.getItem(H2H_LAST_SEARCH_KEY);
-      if (rawLast) {
-        const parsed = JSON.parse(rawLast) as Partial<H2hSearchSnapshot>;
-        if (typeof parsed.playerA === "string") setPlayerA(parsed.playerA);
-        if (typeof parsed.playerB === "string") setPlayerB(parsed.playerB);
-        if (typeof parsed.teamA === "string") setTeamA(parsed.teamA);
-        if (typeof parsed.teamB === "string") setTeamB(parsed.teamB);
-        if (typeof parsed.line === "number" && Number.isFinite(parsed.line)) setLine(parsed.line);
-        if (typeof parsed.lastN === "string" && (lastNOptions as readonly string[]).includes(parsed.lastN)) {
-          setLastN(parsed.lastN as (typeof lastNOptions)[number]);
+      const params = new URLSearchParams(window.location.search);
+      const playerAFromQuery = params.get("playerA")?.trim() ?? "";
+      const playerBFromQuery = params.get("playerB")?.trim() ?? "";
+      const teamAFromQuery = params.get("teamA")?.trim() ?? "";
+      const teamBFromQuery = params.get("teamB")?.trim() ?? "";
+      const lineFromQuery = params.get("line")?.trim() ?? "";
+      const lastNFromQuery = params.get("lastN")?.trim() ?? "";
+      const tabFromQuery = params.get("tab")?.trim() ?? "";
+
+      const hasQueryPrefill = Boolean(playerAFromQuery || playerBFromQuery || teamAFromQuery || teamBFromQuery);
+
+      if (hasQueryPrefill) {
+        setPlayerA(playerAFromQuery);
+        setPlayerB(playerBFromQuery);
+        setTeamA(teamAFromQuery);
+        setTeamB(teamBFromQuery);
+
+        const parsedLine = Number(lineFromQuery);
+        if (Number.isFinite(parsedLine)) {
+          setLine(parsedLine);
         }
-        if (typeof parsed.activeTab === "string") {
-          const safeTab = parsed.activeTab as H2hTab;
-          if (safeTab === "analise" || safeTab === "excel" || safeTab === "jogador") setActiveTab(safeTab);
+
+        if ((lastNOptions as readonly string[]).includes(lastNFromQuery)) {
+          setLastN(lastNFromQuery as (typeof lastNOptions)[number]);
+        }
+
+        if (tabFromQuery === "analise" || tabFromQuery === "excel" || tabFromQuery === "jogador") {
+          setActiveTab(tabFromQuery);
+        }
+      } else {
+        const rawLast = window.localStorage.getItem(H2H_LAST_SEARCH_KEY);
+        if (rawLast) {
+          const parsed = JSON.parse(rawLast) as Partial<H2hSearchSnapshot>;
+          if (typeof parsed.playerA === "string") setPlayerA(parsed.playerA);
+          if (typeof parsed.playerB === "string") setPlayerB(parsed.playerB);
+          if (typeof parsed.teamA === "string") setTeamA(parsed.teamA);
+          if (typeof parsed.teamB === "string") setTeamB(parsed.teamB);
+          if (typeof parsed.line === "number" && Number.isFinite(parsed.line)) setLine(parsed.line);
+          if (typeof parsed.lastN === "string" && (lastNOptions as readonly string[]).includes(parsed.lastN)) {
+            setLastN(parsed.lastN as (typeof lastNOptions)[number]);
+          }
+          if (typeof parsed.activeTab === "string") {
+            const safeTab = parsed.activeTab as H2hTab;
+            if (safeTab === "analise" || safeTab === "excel" || safeTab === "jogador") setActiveTab(safeTab);
+          }
         }
       }
 
@@ -713,6 +788,43 @@ export default function HeadToHeadPage() {
     return lastMatchesWithTeam(allMatches, playerB, teamLabelB, 5);
   }, [contextEnabled, allMatches, playerB, teamLabelB]);
 
+  const referenceLeagueForLast10 = useMemo(() => {
+    if (!contextEnabled) return null;
+    const a = playerA.trim().toLowerCase();
+    const b = playerB.trim().toLowerCase();
+    if (!a || !b || a === b) return null;
+
+    const mostRecent = allMatches
+      .filter((m) => {
+        const home = m.homeNick.trim().toLowerCase();
+        const away = m.awayNick.trim().toLowerCase();
+        return (home === a && away === b) || (home === b && away === a);
+      })
+      .sort((x, y) => +new Date(y.dateTime) - +new Date(x.dateTime))[0];
+
+    const league = mostRecent?.league;
+    return league && league.trim() ? league : null;
+  }, [contextEnabled, allMatches, playerA, playerB]);
+
+  const last10AnyTeamA = useMemo(() => {
+    if (!contextEnabled) return [] as MatchRecord[];
+    const base = last10LeagueOnly && referenceLeagueForLast10
+      ? allMatches.filter((m) => m.league === referenceLeagueForLast10)
+      : allMatches;
+    return lastMatchesForPlayer(base, playerA, 10);
+  }, [contextEnabled, allMatches, playerA, last10LeagueOnly, referenceLeagueForLast10]);
+
+  const last10AnyTeamB = useMemo(() => {
+    if (!contextEnabled) return [] as MatchRecord[];
+    const base = last10LeagueOnly && referenceLeagueForLast10
+      ? allMatches.filter((m) => m.league === referenceLeagueForLast10)
+      : allMatches;
+    return lastMatchesForPlayer(base, playerB, 10);
+  }, [contextEnabled, allMatches, playerB, last10LeagueOnly, referenceLeagueForLast10]);
+
+  const formA10 = useMemo(() => toFormSummary(buildPlayerStats(last10AnyTeamA, playerA, line)), [last10AnyTeamA, playerA, line]);
+  const formB10 = useMemo(() => toFormSummary(buildPlayerStats(last10AnyTeamB, playerB, line)), [last10AnyTeamB, playerB, line]);
+
   const nickIndex = useMemo(() => buildNickIndex(allMatches), [allMatches]);
 
   const nickOptions = useMemo(() => {
@@ -853,6 +965,7 @@ export default function HeadToHeadPage() {
         weightedAvgGoals: 0,
         weightedBttsRate: 0,
         weightedOverRate: 0,
+        effectiveSample: 0,
         bttsInterval: wilsonInterval(0, 0),
         overInterval: wilsonInterval(0, 0),
       };
@@ -862,6 +975,7 @@ export default function HeadToHeadPage() {
     let btts = 0;
     let over = 0;
     let weightSum = 0;
+    let weightSquares = 0;
     let weightedGoals = 0;
     let weightedBtts = 0;
     let weightedOver = 0;
@@ -877,10 +991,13 @@ export default function HeadToHeadPage() {
       if (isOver) over += 1;
 
       weightSum += weight;
+      weightSquares += weight * weight;
       weightedGoals += total * weight;
       if (isBtts) weightedBtts += weight;
       if (isOver) weightedOver += weight;
     });
+
+    const effectiveSample = weightSquares > 0 ? (weightSum * weightSum) / weightSquares : 0;
 
     const overRate = over / totalGames;
     const bttsRate = btts / totalGames;
@@ -892,6 +1009,7 @@ export default function HeadToHeadPage() {
       weightedAvgGoals: weightSum ? weightedGoals / weightSum : 0,
       weightedBttsRate: weightSum ? weightedBtts / weightSum : 0,
       weightedOverRate: weightSum ? weightedOver / weightSum : 0,
+      effectiveSample,
       bttsInterval: wilsonInterval(bttsRate, totalGames),
       overInterval: wilsonInterval(overRate, totalGames),
     };
@@ -1156,6 +1274,25 @@ export default function HeadToHeadPage() {
     if (sampleLabel === "Média") return "Fora: sinal instável.";
     return "Fora: amostra fraca.";
   }, [analysis.valid, h2hScore, playerA, playerB, sampleLabel]);
+
+  const contrarianReasons = useMemo(() => {
+    if (!analysis.valid) return [] as string[];
+
+    const items: string[] = [];
+
+    if (h2hScore.level === "evitar") items.push("Nível: evitar (proteção contra sinal fraco).");
+    if (sampleLabel !== "Alta") items.push(`Confiança ${sampleLabel}: amostra pequena/instável.`);
+
+    const h2hGames = h2hWindow.length;
+    if (h2hGames > 0 && h2hGames < 6) items.push(`Poucos jogos H2H na janela (${h2hGames}).`);
+
+    const width = h2hTotals.overInterval.high - h2hTotals.overInterval.low;
+    if (width >= 0.35) items.push(`IC95% do Over bem largo (${(width * 100).toFixed(0)}pp): alta incerteza.`);
+
+    if (h2hScore.edgeFor === "equilibrado") items.push("Sem vantagem clara para A ou B.");
+
+    return items.slice(0, 4);
+  }, [analysis.valid, h2hScore.level, h2hScore.edgeFor, sampleLabel, h2hWindow.length, h2hTotals.overInterval.high, h2hTotals.overInterval.low]);
 
   const h2hDecision = useMemo(() => {
     const confidenceSample = h2hWindow.length + analysis.commonRows.length;
@@ -1493,10 +1630,32 @@ export default function HeadToHeadPage() {
               <div className="chips" style={{ marginBottom: 10 }}>
                 <Badge tone={h2hScore.score >= 70 ? "good" : h2hScore.score >= 50 ? "warn" : "bad"}>Score {h2hScore.score}/100</Badge>
                 <Badge>Confiança {sampleLabel}</Badge>
+                {h2hWindow.length ? <Badge>n efetivo {h2hTotals.effectiveSample.toFixed(1)}</Badge> : null}
+                {h2hWindow.length ? <Badge>IC95% Over {(h2hTotals.overInterval.low * 100).toFixed(0)}–{(h2hTotals.overInterval.high * 100).toFixed(0)}%</Badge> : null}
                 <Badge>{h2hScore.edgeFor === "A" ? `Vantagem ${playerA}` : h2hScore.edgeFor === "B" ? `Vantagem ${playerB}` : "Sem vantagem clara"}</Badge>
               </div>
               <p style={{ marginTop: 0, marginBottom: 8, fontWeight: 700 }}>{quickTip}</p>
               <p className="mini" style={{ margin: 0 }}>{recommendation}</p>
+            </CardBody>
+          </Card>
+
+          <Card className="col-12">
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Por que NÃO entrar <InfoHint text="Bloco anti-viés: motivos práticos para evitar/segurar a entrada mesmo quando a tendência parece boa." /></h3>
+                <small>Contra-sinais para aumentar disciplina</small>
+              </div>
+            </CardHeader>
+            <CardBody>
+              {!contrarianReasons.length ? (
+                <div className="mini">Sem contra-sinais fortes detectados no recorte atual.</div>
+              ) : (
+                <div className="list">
+                  {contrarianReasons.map((item) => (
+                    <div key={item} className="row"><div className="left"><small style={{ color: "var(--muted)" }}>{item}</small></div></div>
+                  ))}
+                </div>
+              )}
             </CardBody>
           </Card>
 
@@ -1558,6 +1717,103 @@ export default function HeadToHeadPage() {
                           <b>{m.homeNick} {m.homeGoals} x {m.awayGoals} {m.awayNick}</b>
                           <small>{formatDateTimePtBr(m.dateTime)} • {m.homeNick.toLowerCase() === playerB.toLowerCase() ? m.homeTeam : m.awayTeam}</small>
                         </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
+          <Card className="col-6">
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Últimos 10 jogos ({playerA})</h3>
+                <small>
+                  {last10LeagueOnly && referenceLeagueForLast10 ? `Liga: ${referenceLeagueForLast10} (filtro)` : "Qualquer liga"} • Qualquer time
+                </small>
+              </div>
+              <div className="chips">
+                <Button onClick={() => setLast10LeagueOnly((v) => !v)}>
+                  {last10LeagueOnly ? "Ver geral" : "Somente liga"}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardBody>
+              <div className="chips" style={{ marginBottom: 10 }}>
+                <Badge>{formA10.wins}-{formA10.draws}-{formA10.losses}</Badge>
+                <Badge>PPG {formA10.ppg.toFixed(2)}</Badge>
+                <Badge>GF/GA {formA10.gf}-{formA10.ga}</Badge>
+                <Badge>Média total {formA10.avgTotal.toFixed(2)}</Badge>
+                <Badge>Over {line}: {(formA10.overRate * 100).toFixed(0)}%</Badge>
+                <Badge>BTTS: {(formA10.bttsRate * 100).toFixed(0)}%</Badge>
+              </div>
+              {!last10AnyTeamA.length ? (
+                <EmptyState title="Sem dados" subtitle="Não há jogos suficientes desse nick na base local." />
+              ) : (
+                <div className="list">
+                  {last10AnyTeamA.map((m) => (
+                    <div key={m.id} className="row">
+                      <div className="left">
+                        <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <PlayerAvatar nick={m.homeNick} size={24} radius={10} />
+                          <PlayerAvatar nick={m.awayNick} size={24} radius={10} />
+                        </div>
+                        <div className="nick">
+                          <b>{m.homeNick} {m.homeGoals} x {m.awayGoals} {m.awayNick}</b>
+                          <small>
+                            {formatDateTimePtBr(m.dateTime)} • {m.league} • {m.homeNick.toLowerCase() === playerA.toLowerCase() ? m.homeTeam : m.awayTeam}
+                          </small>
+                        </div>
+                      </div>
+                      <div className="metric">
+                        <Link href={`/h2h/match/${encodeURIComponent(m.id)}`} style={{ textDecoration: "underline" }}>detalhes</Link>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
+          <Card className="col-6">
+            <CardHeader>
+              <div>
+                <h3 style={{ margin: 0 }}>Últimos 10 jogos ({playerB})</h3>
+                <small>
+                  {last10LeagueOnly && referenceLeagueForLast10 ? `Liga: ${referenceLeagueForLast10} (filtro)` : "Qualquer liga"} • Qualquer time
+                </small>
+              </div>
+            </CardHeader>
+            <CardBody>
+              <div className="chips" style={{ marginBottom: 10 }}>
+                <Badge>{formB10.wins}-{formB10.draws}-{formB10.losses}</Badge>
+                <Badge>PPG {formB10.ppg.toFixed(2)}</Badge>
+                <Badge>GF/GA {formB10.gf}-{formB10.ga}</Badge>
+                <Badge>Média total {formB10.avgTotal.toFixed(2)}</Badge>
+                <Badge>Over {line}: {(formB10.overRate * 100).toFixed(0)}%</Badge>
+                <Badge>BTTS: {(formB10.bttsRate * 100).toFixed(0)}%</Badge>
+              </div>
+              {!last10AnyTeamB.length ? (
+                <EmptyState title="Sem dados" subtitle="Não há jogos suficientes desse nick na base local." />
+              ) : (
+                <div className="list">
+                  {last10AnyTeamB.map((m) => (
+                    <div key={m.id} className="row">
+                      <div className="left">
+                        <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <PlayerAvatar nick={m.homeNick} size={24} radius={10} />
+                          <PlayerAvatar nick={m.awayNick} size={24} radius={10} />
+                        </div>
+                        <div className="nick">
+                          <b>{m.homeNick} {m.homeGoals} x {m.awayGoals} {m.awayNick}</b>
+                          <small>
+                            {formatDateTimePtBr(m.dateTime)} • {m.league} • {m.homeNick.toLowerCase() === playerB.toLowerCase() ? m.homeTeam : m.awayTeam}
+                          </small>
+                        </div>
+                      </div>
+                      <div className="metric">
+                        <Link href={`/h2h/match/${encodeURIComponent(m.id)}`} style={{ textDecoration: "underline" }}>detalhes</Link>
                       </div>
                     </div>
                   ))}
