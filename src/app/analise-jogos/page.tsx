@@ -96,6 +96,9 @@ type MatchInsight = {
   homeBounceBack: BounceBackProfile;
   awayBounceBack: BounceBackProfile;
   revengeFactor: RevengeFactor;
+  overProbs: { line: number; poisson: number; empirical: number; blended: number }[];
+  consensusOver25: boolean;
+  dangerZone: boolean;
 };
 
 type PlayerIndividualStats = {
@@ -984,6 +987,44 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const awayBounceBack = computeBounceBack(allMatches, fixture.awayNick);
     const revengeFactor = computeRevengeFactor(allMatches, fixture.homeNick, fixture.awayNick);
 
+    // === MOTOR DE PREVISÃO v2 — Poisson + Sigmoid + Odds + Comportamental ===
+
+    // 1. Expected goals (lambdas) — modelo composto
+    let lambdaHome = home.gf * 0.55 + away.ga * 0.45;
+    let lambdaAway = away.gf * 0.55 + home.ga * 0.45;
+
+    // Ajuste por forma recente
+    lambdaHome = lambdaHome * 0.70 + homeDeep.recent.avgGoalsFor * 0.30;
+    lambdaAway = lambdaAway * 0.70 + awayDeep.recent.avgGoalsFor * 0.30;
+
+    // Ajuste por H2H (3+ jogos)
+    if (h2hRows.length >= 3) {
+      const h2hHomeLambda = h2hGamesList.reduce((s, g) => s + g.homeGoals, 0) / h2hRows.length;
+      const h2hAwayLambda = h2hGamesList.reduce((s, g) => s + g.awayGoals, 0) / h2hRows.length;
+      const h2hW = Math.min(0.25, h2hRows.length * 0.04);
+      lambdaHome = lambdaHome * (1 - h2hW) + h2hHomeLambda * h2hW;
+      lambdaAway = lambdaAway * (1 - h2hW) + h2hAwayLambda * h2hW;
+    }
+
+    const expectedHomeGoals = clamp(lambdaHome, 0.35, 5.5);
+    const expectedAwayGoals = clamp(lambdaAway, 0.35, 5.5);
+    const expectedGoals = expectedHomeGoals + expectedAwayGoals;
+    const mostLikelyScores = computeMostLikelyScores(expectedHomeGoals, expectedAwayGoals);
+
+    // 2. Poisson 1X2
+    let poissonHome = 0;
+    let poissonDraw = 0;
+    let poissonAway = 0;
+    for (let h = 0; h <= 8; h += 1) {
+      for (let a = 0; a <= 8; a += 1) {
+        const p = poissonPmf(expectedHomeGoals, h) * poissonPmf(expectedAwayGoals, a);
+        if (h > a) poissonHome += p;
+        else if (h === a) poissonDraw += p;
+        else poissonAway += p;
+      }
+    }
+
+    // 3. Modelo estatístico (sigmoid)
     const formDiff = (home.ppg - away.ppg) / 3;
     const winDiff = home.winRate - away.winRate;
     const attackDiff = (home.gf - away.gf) / 4;
@@ -991,67 +1032,102 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const h2hDiff = h2hRows.length ? (homeH2hPoints - awayH2hPoints) / Math.max(1, h2hRows.length * 3) : 0;
 
     const score =
-      formDiff * 0.35 +
-      winDiff * 0.2 +
+      formDiff * 0.30 +
+      winDiff * 0.20 +
       attackDiff * 0.15 +
       defenseDiff * 0.15 +
-      h2hDiff * 0.15;
+      h2hDiff * 0.20;
 
     const drawWeight = clamp(0.2 + (1 - Math.min(1, Math.abs(score) * 1.7)) * 0.12, 0.12, 0.34);
     const winBudget = 1 - drawWeight;
+    const sigmoidHome = winBudget * sigmoid(score * 2.4);
+    const sigmoidAway = winBudget - sigmoidHome;
+    const sigmoidDraw = drawWeight;
 
-    let homeProb = winBudget * sigmoid(score * 2.4);
-    let awayProb = winBudget - homeProb;
-    let drawProb = drawWeight;
+    // 4. Ajustes comportamentais
+    let homeAdj = 0;
+    let awayAdj = 0;
+    if (homeStreak.winStreak >= 3) homeAdj += 0.015 * Math.min(homeStreak.winStreak, 5);
+    if (homeStreak.lossStreak >= 2) homeAdj -= 0.01 * Math.min(homeStreak.lossStreak, 4);
+    if (awayStreak.winStreak >= 3) awayAdj += 0.015 * Math.min(awayStreak.winStreak, 5);
+    if (awayStreak.lossStreak >= 2) awayAdj -= 0.01 * Math.min(awayStreak.lossStreak, 4);
+    if (homeStreak.lossStreak > 0 && homeBounceBack.bounceBackScore >= 55) homeAdj += 0.025 * (homeBounceBack.bounceBackScore / 100);
+    if (awayStreak.lossStreak > 0 && awayBounceBack.bounceBackScore >= 55) awayAdj += 0.025 * (awayBounceBack.bounceBackScore / 100);
+    if (revengeFactor.signal === "vingança forte") homeAdj += 0.025;
+    else if (revengeFactor.signal === "vingança moderada") homeAdj += 0.01;
 
+    // 5. Blend final: Poisson (35%) + Sigmoid (25%) + Odds (40%) | sem odds: 50/50
     const implied = impliedFromOdds(fixture.oddHome, fixture.oddDraw, fixture.oddAway);
+    let homeProb: number;
+    let drawProb: number;
+    let awayProb: number;
     if (implied) {
-      homeProb = homeProb * 0.72 + implied.home * 0.28;
-      drawProb = drawProb * 0.72 + implied.draw * 0.28;
-      awayProb = awayProb * 0.72 + implied.away * 0.28;
+      homeProb = poissonHome * 0.30 + sigmoidHome * 0.25 + implied.home * 0.45;
+      drawProb = poissonDraw * 0.30 + sigmoidDraw * 0.25 + implied.draw * 0.45;
+      awayProb = poissonAway * 0.30 + sigmoidAway * 0.25 + implied.away * 0.45;
+    } else {
+      homeProb = poissonHome * 0.50 + sigmoidHome * 0.50;
+      drawProb = poissonDraw * 0.50 + sigmoidDraw * 0.50;
+      awayProb = poissonAway * 0.50 + sigmoidAway * 0.50;
     }
+    homeProb += homeAdj;
+    awayProb += awayAdj;
+    drawProb -= (homeAdj + awayAdj) * 0.3;
+    const rawNorm = homeProb + drawProb + awayProb || 1;
+    homeProb = Math.max(0.02, homeProb / rawNorm);
+    drawProb = Math.max(0.02, drawProb / rawNorm);
+    awayProb = Math.max(0.02, awayProb / rawNorm);
+    const norm2 = homeProb + drawProb + awayProb;
+    homeProb /= norm2;
+    drawProb /= norm2;
+    awayProb /= norm2;
 
-    const norm = homeProb + drawProb + awayProb || 1;
-    homeProb /= norm;
-    drawProb /= norm;
-    awayProb /= norm;
+    // 6. Over probabilities com blend empírico (Poisson + dados reais + H2H)
+    const overLines = [1.5, 2.5, 3.5, 4.5];
+    const overProbs = overLines.map((line) => {
+      const poissonOver = 1 - poissonCdf(expectedGoals, line);
+      const homeOR = home.overRates.find((r) => r.line === line)?.rate ?? poissonOver;
+      const awayOR = away.overRates.find((r) => r.line === line)?.rate ?? poissonOver;
+      const h2hOR = h2hOverRates.find((r) => r.line === line)?.rate ?? 0;
+      const empirical = (homeOR + awayOR) / 2;
+      let blended: number;
+      if (h2hRows.length >= 3) {
+        blended = poissonOver * 0.35 + empirical * 0.40 + h2hOR * 0.25;
+      } else {
+        blended = poissonOver * 0.45 + empirical * 0.55;
+      }
+      return { line, poisson: poissonOver, empirical, blended: clamp(blended, 0, 1) };
+    });
 
-    const expectedHomeGoals = clamp((home.gf + away.ga) / 2, 0.45, 5.2);
-    const expectedAwayGoals = clamp((away.gf + home.ga) / 2, 0.45, 5.2);
-    const expectedGoals = expectedHomeGoals + expectedAwayGoals;
-    const mostLikelyScores = computeMostLikelyScores(expectedHomeGoals, expectedAwayGoals);
+    // BTTS com blend empírico
+    const poissonBtts = 1 - Math.exp(-expectedHomeGoals) - Math.exp(-expectedAwayGoals) + Math.exp(-(expectedHomeGoals + expectedAwayGoals));
+    const empiricalBtts = (home.bttsRate + away.bttsRate) / 2;
+    const bttsProb = h2hRows.length >= 3
+      ? poissonBtts * 0.30 + empiricalBtts * 0.40 + h2hBttsRate * 0.30
+      : poissonBtts * 0.40 + empiricalBtts * 0.60;
 
-    const over25 = 1 - poissonCdf(expectedGoals, 2);
-    const over35 = 1 - poissonCdf(expectedGoals, 3);
-    const under35 = poissonCdf(expectedGoals, 3);
-    const bttsProb = 1 - Math.exp(-expectedHomeGoals) - Math.exp(-expectedAwayGoals) + Math.exp(-(expectedHomeGoals + expectedAwayGoals));
+    // Consenso Over 2.5: quando Poisson, empírico e H2H concordam
+    const ov25 = overProbs.find((r) => r.line === 2.5);
+    const ov25H2h = h2hOverRates.find((r) => r.line === 2.5)?.rate ?? 0;
+    const consensusOver25 = (ov25?.poisson ?? 0) >= 0.50 && (ov25?.empirical ?? 0) >= 0.50 && (h2hRows.length < 3 || ov25H2h >= 0.50);
 
-    const markets: MarketInsight[] = [
-      {
-        market: "Over 2.5",
-        probability: clamp(over25, 0, 1),
-        fairOdd: 1 / Math.max(0.01, clamp(over25, 0, 1)),
-        signal: over25 >= 0.5 ? "over" : "under",
-      },
-      {
-        market: "Over 3.5",
-        probability: clamp(over35, 0, 1),
-        fairOdd: 1 / Math.max(0.01, clamp(over35, 0, 1)),
-        signal: over35 >= 0.5 ? "over" : "under",
-      },
-      {
-        market: "Under 3.5",
-        probability: clamp(under35, 0, 1),
-        fairOdd: 1 / Math.max(0.01, clamp(under35, 0, 1)),
-        signal: under35 >= 0.5 ? "under" : "over",
-      },
-      {
-        market: "BTTS (Sim)",
-        probability: clamp(bttsProb, 0, 1),
-        fairOdd: 1 / Math.max(0.01, clamp(bttsProb, 0, 1)),
-        signal: bttsProb >= 0.5 ? "over" : "under",
-      },
-    ];
+    // Danger zone: jogo muito imprevisível
+    const maxProb = Math.max(homeProb, drawProb, awayProb);
+    const dangerZone = maxProb < 0.40 && drawProb >= 0.28;
+
+    // Markets completos: Over 1.5, 2.5, 3.5, 4.5 + BTTS
+    const markets: MarketInsight[] = overProbs.map((op) => ({
+      market: `Over ${op.line}`,
+      probability: op.blended,
+      fairOdd: 1 / Math.max(0.01, op.blended),
+      signal: (op.blended >= 0.5 ? "over" : "under") as "over" | "under",
+    }));
+    markets.push({
+      market: "BTTS (Sim)",
+      probability: clamp(bttsProb, 0, 1),
+      fairOdd: 1 / Math.max(0.01, clamp(bttsProb, 0, 1)),
+      signal: bttsProb >= 0.5 ? "over" : "under",
+    });
 
     const ordered = [
       { key: "Casa" as const, value: homeProb },
@@ -1063,7 +1139,15 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const second = ordered[1];
     const edge = top.value - (second?.value ?? 0);
     const coverage = Math.min(home.games, away.games) / sampleWindow;
-    const confidenceScore = edge * 100 * 0.7 + clamp(coverage, 0, 1) * 30;
+
+    // Confiança multipilar
+    let confidenceScore = 0;
+    confidenceScore += edge * 100 * 0.50;
+    confidenceScore += clamp(coverage, 0, 1) * 25;
+    confidenceScore += (h2hRows.length >= 5 ? 12 : h2hRows.length >= 3 ? 8 : h2hRows.length >= 1 ? 4 : 0);
+    confidenceScore += top.value >= 0.50 ? 10 : top.value >= 0.42 ? 6 : 2;
+    confidenceScore += dangerZone ? -8 : 0;
+    confidenceScore += Math.abs(home.ppg - away.ppg) >= 0.8 ? 8 : Math.abs(home.ppg - away.ppg) >= 0.4 ? 4 : 0;
 
     let confidence: "baixa" | "media" | "alta" = "baixa";
     if (confidenceScore >= profile.confidenceHigh) confidence = "alta";
@@ -1108,7 +1192,9 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
       `${fixture.homeNick} recuperação: ${Math.round(homeDeep.recovery.score)} (${homeDeep.recovery.reason})`,
       `${fixture.awayNick} recuperação: ${Math.round(awayDeep.recovery.score)} (${awayDeep.recovery.reason})`,
       overAlertReason,
-      `Média esperada de gols: ${expectedGoals.toFixed(2)}.`,
+      `Média esperada de gols: ${expectedGoals.toFixed(2)} (Poisson+Empírico).`,
+      consensusOver25 ? `Consenso Over 2.5: Poisson, empírico e H2H convergem à favor.` : `Sem consenso Over 2.5 entre os modelos.`,
+      dangerZone ? `DANGER ZONE: jogo muito equilibrado, cautela máxima.` : `Jogo com diferenciação nítida entre os lados.`,
     ];
 
     return {
@@ -1154,6 +1240,9 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
       homeBounceBack,
       awayBounceBack,
       revengeFactor,
+      overProbs,
+      consensusOver25,
+      dangerZone,
     };
   });
 }
@@ -1172,6 +1261,12 @@ export default function AnaliseJogosPage() {
   const [detailItem, setDetailItem] = useState<MatchInsight | null>(null);
   const [copyMessage, setCopyMessage] = useState("");
   const [analysisMatches, setAnalysisMatches] = useState<MatchRecord[]>([]);
+  const [confidenceFilter, setConfidenceFilter] = useState<"todos" | "alta" | "media" | "baixa">("todos");
+
+  const filteredInsights = useMemo(() => {
+    if (confidenceFilter === "todos") return insights;
+    return insights.filter((i) => i.confidence === confidenceFilter);
+  }, [insights, confidenceFilter]);
 
   const canRun = useMemo(() => rawInput.trim().length > 0, [rawInput]);
 
@@ -1426,12 +1521,14 @@ export default function AnaliseJogosPage() {
 
   function buildShareSummary(item: MatchInsight) {
     const risk = buildRiskSignal(item);
+    const o25 = item.overProbs.find((r) => r.line === 2.5);
     return [
       `${item.fixture.homeNick} x ${item.fixture.awayNick} (${item.fixture.homeTeam} x ${item.fixture.awayTeam})`,
       `Palpite: ${item.pick} | Força: ${Math.round(item.confidenceScore)} | ${risk.label}`,
       `Prob.: Casa ${(item.homeProb * 100).toFixed(1)}% | Empate ${(item.drawProb * 100).toFixed(1)}% | Fora ${(item.awayProb * 100).toFixed(1)}%`,
       item.valueEdgePp == null ? "Vantagem: sem odd informada" : `Vantagem: ${item.valueEdgePp.toFixed(1)}pp`,
-      `Over alert: ${item.overAlert.active ? "sim" : "não"} | Cenário: ${buildDirectSummary(item).bestScenario}`,
+      `Over 2.5: ${((o25?.blended ?? 0) * 100).toFixed(0)}% | BTTS: ${(item.bttsProb * 100).toFixed(0)}% | xG: ${item.expectedGoals.toFixed(2)}`,
+      `Cenário: ${buildDirectSummary(item).bestScenario}${item.consensusOver25 ? " | CONSENSO O2.5" : ""}${item.dangerZone ? " | DANGER ZONE" : ""}`,
     ].join("\n");
   }
 
@@ -1515,10 +1612,24 @@ export default function AnaliseJogosPage() {
                   setError("");
                   setSaveMessage("");
                   setRawInput("");
+                  setConfidenceFilter("todos");
                 }}
               >
                 Limpar
               </Button>
+              {!!insights.length && (
+                <select
+                  className="select"
+                  value={confidenceFilter}
+                  onChange={(event) => setConfidenceFilter(event.target.value as "todos" | "alta" | "media" | "baixa")}
+                  aria-label="Filtro de confiança"
+                >
+                  <option value="todos">Todos ({insights.length})</option>
+                  <option value="alta">Alta ({insights.filter((i) => i.confidence === "alta").length})</option>
+                  <option value="media">Média ({insights.filter((i) => i.confidence === "media").length})</option>
+                  <option value="baixa">Baixa ({insights.filter((i) => i.confidence === "baixa").length})</option>
+                </select>
+              )}
               <span className="mini">Jogos identificados: {parsed.length}</span>
               {!!saveMessage && <span className="mini">{saveMessage}</span>}
             </div>
@@ -1541,6 +1652,11 @@ export default function AnaliseJogosPage() {
               <h3>Resultado dos jogos</h3>
               <small>Veja quem está mais forte no confronto e se existe vantagem na odd.</small>
             </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Badge tone="neutral">{filteredInsights.length} jogos</Badge>
+              {insights.some((i) => i.dangerZone) && <Badge tone="bad">{insights.filter((i) => i.dangerZone).length} danger zone</Badge>}
+              {insights.some((i) => i.consensusOver25) && <Badge tone="good">{insights.filter((i) => i.consensusOver25).length} consenso O2.5</Badge>}
+            </div>
           </CardHeader>
           <CardBody>
             <Table>
@@ -1555,17 +1671,29 @@ export default function AnaliseJogosPage() {
                   <th>Confiança</th>
                   <th className="right">Força</th>
                   <th>Vantagem</th>
-                  <th className="right">Expectativa de gols</th>
+                  <th className="right">Gols esp.</th>
+                  <th className="right">O 1.5</th>
+                  <th className="right">O 2.5</th>
+                  <th className="right">O 3.5</th>
+                  <th className="right">O 4.5</th>
+                  <th className="right">BTTS</th>
                   <th>Ações</th>
                 </tr>
               </thead>
               <tbody>
-                {insights.map((item) => (
-                  <tr key={item.fixture.id}>
+                {filteredInsights.map((item) => {
+                  const o15 = item.overProbs.find((r) => r.line === 1.5);
+                  const o25 = item.overProbs.find((r) => r.line === 2.5);
+                  const o35 = item.overProbs.find((r) => r.line === 3.5);
+                  const o45 = item.overProbs.find((r) => r.line === 4.5);
+                  return (
+                  <tr key={item.fixture.id} style={item.dangerZone ? { opacity: 0.7 } : undefined}>
                     <td>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                         <strong>{item.fixture.homeTeam} x {item.fixture.awayTeam}</strong>
                         <span className="mini">{item.fixture.homeNick} vs {item.fixture.awayNick}</span>
+                        {item.dangerZone && <span className="badge bad" style={{ fontSize: 9 }}>DANGER ZONE</span>}
+                        {item.consensusOver25 && <span className="badge good" style={{ fontSize: 9 }}>CONSENSO O2.5</span>}
                       </div>
                     </td>
                     <td>{item.fixture.labelTime}</td>
@@ -1574,7 +1702,7 @@ export default function AnaliseJogosPage() {
                     <td className="right">{(item.awayProb * 100).toFixed(1)}%</td>
                     <td>
                       <Badge tone={item.pick === "Empate" ? "warn" : "good"}>{item.pick}</Badge>
-                      {item.overAlert.active && <span className="badge warn" style={{ marginLeft: 6 }}>ALERTA DE OVER</span>}
+                      {item.overAlert.active && <span className="badge warn" style={{ marginLeft: 6 }}>OVER</span>}
                     </td>
                     <td>
                       <Badge tone={item.confidence === "alta" ? "good" : item.confidence === "media" ? "warn" : "bad"}>
@@ -1584,19 +1712,25 @@ export default function AnaliseJogosPage() {
                     <td className="right">{Math.round(item.confidenceScore)}</td>
                     <td>
                       {item.valueEdgePp == null ? (
-                        <span className="mini">odd não informada</span>
+                        <span className="mini">sem odd</span>
                       ) : item.isValueBet ? (
-                        <span className="badge good">VANTAGEM +{item.valueEdgePp.toFixed(1)}pp</span>
+                        <span className="badge good">+{item.valueEdgePp.toFixed(1)}pp</span>
                       ) : (
                         <span className="badge">{item.valueEdgePp.toFixed(1)}pp</span>
                       )}
                     </td>
                     <td className="right">{item.expectedGoals.toFixed(2)}</td>
+                    <td className="right"><span className={`badge ${(o15?.blended ?? 0) >= 0.65 ? "good" : (o15?.blended ?? 0) >= 0.45 ? "warn" : "bad"}`}>{((o15?.blended ?? 0) * 100).toFixed(0)}%</span></td>
+                    <td className="right"><span className={`badge ${(o25?.blended ?? 0) >= 0.55 ? "good" : (o25?.blended ?? 0) >= 0.40 ? "warn" : "bad"}`}>{((o25?.blended ?? 0) * 100).toFixed(0)}%</span></td>
+                    <td className="right"><span className={`badge ${(o35?.blended ?? 0) >= 0.50 ? "good" : (o35?.blended ?? 0) >= 0.35 ? "warn" : "bad"}`}>{((o35?.blended ?? 0) * 100).toFixed(0)}%</span></td>
+                    <td className="right"><span className={`badge ${(o45?.blended ?? 0) >= 0.40 ? "good" : (o45?.blended ?? 0) >= 0.25 ? "warn" : "bad"}`}>{((o45?.blended ?? 0) * 100).toFixed(0)}%</span></td>
+                    <td className="right"><span className={`badge ${item.bttsProb >= 0.55 ? "good" : item.bttsProb >= 0.40 ? "warn" : "bad"}`}>{(item.bttsProb * 100).toFixed(0)}%</span></td>
                     <td>
                       <Button onClick={() => setDetailItem(item)}>Detalhes</Button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </Table>
           </CardBody>
@@ -1607,17 +1741,66 @@ export default function AnaliseJogosPage() {
         <Card className="col-12">
           <CardHeader>
             <div>
+              <h3>Painel de sinais</h3>
+              <small>Visão rápida dos sinais mais relevantes de cada jogo.</small>
+            </div>
+          </CardHeader>
+          <CardBody>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 12 }}>
+              {filteredInsights.map((item) => {
+                const risk = buildRiskSignal(item);
+                const bestOver = item.overProbs.filter((o) => o.blended >= 0.50).sort((a, b) => b.blended - a.blended)[0];
+                return (
+                  <div key={`signal-${item.fixture.id}`} className="card" style={{ padding: 12, cursor: "pointer" }} onClick={() => setDetailItem(item)}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <strong style={{ fontSize: 13 }}>{item.fixture.homeNick} x {item.fixture.awayNick}</strong>
+                      <span className={`badge ${risk.toneClass}`} style={{ fontSize: 10 }}>{risk.label}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <span className={`badge ${item.confidence === "alta" ? "good" : item.confidence === "media" ? "warn" : "bad"}`}>
+                        {item.pick} • {Math.round(item.confidenceScore)}
+                      </span>
+                      <span className="badge">xG {item.expectedGoals.toFixed(1)}</span>
+                      <span className={`badge ${item.bttsProb >= 0.55 ? "good" : item.bttsProb >= 0.40 ? "warn" : "bad"}`}>
+                        BTTS {(item.bttsProb * 100).toFixed(0)}%
+                      </span>
+                      {bestOver && (
+                        <span className="badge good">O {bestOver.line} {(bestOver.blended * 100).toFixed(0)}%</span>
+                      )}
+                      {item.consensusOver25 && <span className="badge good" style={{ fontSize: 10 }}>CONSENSO</span>}
+                      {item.dangerZone && <span className="badge bad" style={{ fontSize: 10 }}>PERIGO</span>}
+                      {item.isValueBet && <span className="badge good" style={{ fontSize: 10 }}>VALUE</span>}
+                      {item.homeStreak.lossStreak > 0 && item.homeBounceBack.bounceBackScore >= 60 && (
+                        <span className="badge warn" style={{ fontSize: 10 }}>{item.fixture.homeNick} BOUNCE</span>
+                      )}
+                      {item.awayStreak.lossStreak > 0 && item.awayBounceBack.bounceBackScore >= 60 && (
+                        <span className="badge warn" style={{ fontSize: 10 }}>{item.fixture.awayNick} BOUNCE</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      {!!insights.length && (
+        <Card className="col-12">
+          <CardHeader>
+            <div>
               <h3>Sugestões de mercado</h3>
-              <small>Linhas de over/under e ambas marcam, com chance estimada e odd justa.</small>
+              <small>Over 1.5 a 4.5 e BTTS com probabilidade blendada (Poisson + empírico + H2H) e odd justa.</small>
             </div>
           </CardHeader>
           <CardBody>
             <div className="list">
-              {insights.map((item) => (
+              {filteredInsights.map((item) => (
                 <div key={`${item.fixture.id}-markets`} className="row" style={{ alignItems: "flex-start" }}>
                   <div style={{ minWidth: 240 }}>
                     <strong>{item.fixture.homeNick} x {item.fixture.awayNick}</strong>
-                    <div className="mini">Amostra {item.sampleHome}/{item.sampleAway} (H2H {item.sampleH2h})</div>
+                    <div className="mini">Amostra {item.sampleHome}/{item.sampleAway} (H2H {item.sampleH2h}) • xG {item.expectedGoals.toFixed(2)}</div>
+                    {item.consensusOver25 && <span className="badge good" style={{ fontSize: 10, marginTop: 4 }}>CONSENSO O2.5</span>}
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
                     {item.markets.map((market) => (
@@ -1643,7 +1826,7 @@ export default function AnaliseJogosPage() {
           </CardHeader>
           <CardBody>
             <div className="list">
-              {insights.map((item) => (
+              {filteredInsights.map((item) => (
                 <div key={`${item.fixture.id}-deep`} className="row" style={{ alignItems: "flex-start", gap: 16 }}>
                   <div style={{ minWidth: 220 }}>
                     <strong>{item.fixture.homeNick} x {item.fixture.awayNick}</strong>
