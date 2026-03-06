@@ -200,7 +200,7 @@ function parseIsoToSaoPauloParts(iso: string) {
 function normalizeLeagueUrl(leagueUrl: string) {
   const withoutHash = leagueUrl.split("#")[0];
   const withoutQuery = withoutHash.split("?")[0];
-  return withoutQuery.replace(/\/p\.\d+$/, "");
+  return withoutQuery.replace(/\/p\.\d+$/, "").replace(/\/+$/, "");
 }
 
 function toAbsoluteBetsApiUrl(input: string) {
@@ -230,6 +230,33 @@ function findFixturesUrlFromHtml(html: string, fallbackBaseUrl: string) {
   return fallbackBaseUrl;
 }
 
+function findResultsUrlFromHtml(html: string, fallbackBaseUrl: string) {
+  const anchorMatches = [...html.matchAll(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)];
+
+  for (const match of anchorMatches) {
+    const href = match[1] ?? "";
+    const labelRaw = match[2] ?? "";
+    const label = decodeEntities(stripTags(labelRaw)).replace(/\s+/g, " ").trim().toLowerCase();
+    if (!href) continue;
+
+    if (label.includes("results") || /\/le\//i.test(href)) {
+      return normalizeLeagueUrl(toAbsoluteBetsApiUrl(href));
+    }
+  }
+
+  // If the URL itself is already a /le/ or /ls/ page, use it directly.
+  if (/\/(le|ls)\//i.test(fallbackBaseUrl)) {
+    return normalizeLeagueUrl(fallbackBaseUrl);
+  }
+
+  // Try converting other path types to /le/.
+  if (/\/(l|fi)\//i.test(fallbackBaseUrl)) {
+    return normalizeLeagueUrl(fallbackBaseUrl.replace(/\/(l|fi)\//i, "/le/"));
+  }
+
+  return normalizeLeagueUrl(fallbackBaseUrl);
+}
+
 function buildLeagueUrlCandidates(leagueUrl: string) {
   const base = normalizeLeagueUrl(leagueUrl);
   const candidates = [base];
@@ -245,8 +272,9 @@ function buildLeagueUrlCandidates(leagueUrl: string) {
 }
 
 function buildPageUrl(baseUrl: string, page: number) {
-  if (page <= 1) return baseUrl;
-  return `${baseUrl}/p.${page}`;
+  const clean = baseUrl.replace(/\/+$/, "");
+  if (page <= 1) return clean;
+  return `${clean}/p.${page}`;
 }
 
 function parseRowsFromHtml(html: string): BetsApiMatch[] {
@@ -512,61 +540,113 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number,
   let processedPages = 0;
   const errors: string[] = [];
 
+  function addMatches(items: BetsApiMatch[]) {
+    for (const item of items) {
+      const key = `${item.dateTime}|${item.fixture}|${item.score}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      allMatches.push(item);
+      if (safeMaxMatches != null && allMatches.length >= safeMaxMatches) return;
+    }
+  }
+
+  function reachedLimit() {
+    return safeMaxMatches != null && allMatches.length >= safeMaxMatches;
+  }
+
   for (const candidate of baseCandidates) {
     try {
       const rootHtml = await fetchBetsApiPage(candidate, options);
-      const fixturesBaseUrl = findFixturesUrlFromHtml(rootHtml, candidate);
 
-      for (let page = 1; page <= safeMaxPages; page += 1) {
-        const pageUrl = buildPageUrl(fixturesBaseUrl, page);
-        const html = await fetchBetsApiPage(pageUrl, options);
-        const pageMatches = parseRowsFromHtml(html);
-        processedPages += 1;
+      // Parse the root HTML itself (it may already contain a results table).
+      const rootMatches = parseRowsFromHtml(rootHtml);
+      addMatches(rootMatches);
+      if (rootMatches.length > 0) processedPages += 1;
 
-        if (pageMatches.length === 0) break;
+      if (reachedLimit()) break;
 
-        for (const item of pageMatches) {
-          const key = `${item.dateTime}|${item.fixture}|${item.score}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          allMatches.push(item);
+      // Find the Results URL (the /le/ page that lists past matches with
+      // scores). This is the correct URL for pagination – NOT /fi/ which
+      // shows upcoming fixtures without scores.
+      const resultsBaseUrl = findResultsUrlFromHtml(rootHtml, candidate);
 
-          if (safeMaxMatches != null && allMatches.length >= safeMaxMatches) {
+      // Build unique pagination bases: results URL first, then the
+      // candidate URL itself if different.
+      const paginationBases: string[] = [resultsBaseUrl];
+      const normalizedCandidate = normalizeLeagueUrl(candidate);
+      if (normalizedCandidate !== resultsBaseUrl) {
+        paginationBases.push(normalizedCandidate);
+      }
+
+      for (const base of paginationBases) {
+        const beforePaginate = allMatches.length;
+
+        // Start from page 2: page 1 is the root HTML we already parsed above.
+        for (let page = 2; page <= safeMaxPages; page += 1) {
+          const pageUrl = buildPageUrl(base, page);
+          let html: string;
+          try {
+            html = await fetchBetsApiPage(pageUrl, options);
+          } catch {
             break;
           }
+          const pageMatches = parseRowsFromHtml(html);
+          processedPages += 1;
+
+          if (pageMatches.length === 0) break;
+
+          const beforeCount = allMatches.length;
+          addMatches(pageMatches);
+
+          // Detect stale pages (pagination returning same content)
+          if (allMatches.length === beforeCount) {
+            // All matches already seen – pagination likely looping
+            break;
+          }
+
+          if (reachedLimit()) break;
         }
 
-        if (safeMaxMatches != null && allMatches.length >= safeMaxMatches) {
-          break;
-        }
+        if (reachedLimit()) break;
+
+        // If this base yielded new matches beyond page 1, stop trying
+        // other pagination bases.
+        if (allMatches.length > beforePaginate) break;
       }
 
-      if (allMatches.length > 0) {
-        return {
-          processedPages,
-          matches: allMatches,
-          lines: allMatches.map((item) => `${item.dateTime}\t-\t${item.fixture}\t${item.score}`),
-        };
-      }
+      if (allMatches.length > 0) break;
     } catch (error) {
       errors.push(error instanceof Error ? error.message : `Falha ao ler ${candidate}`);
     }
   }
 
-  const boardFallback = await collectBetsApiBoard(leagueUrl, safeMaxPages, options);
-  const finishedRows = boardFallback.rows.filter((item) => item.status === "finished" && SCORE_RE.test(item.score));
-  const fallbackMatches = finishedRows.map((item) => ({
-    dateTime: item.eventTime,
-    fixture: item.fixture,
-    score: item.score.replace(":", "-"),
-  }));
-
-  if (fallbackMatches.length > 0) {
+  if (allMatches.length > 0) {
     return {
-      processedPages: Math.max(processedPages, boardFallback.processedPages),
-      matches: fallbackMatches,
-      lines: fallbackMatches.map((item) => `${item.dateTime}\t-\t${item.fixture}\t${item.score}`),
+      processedPages,
+      matches: allMatches,
+      lines: allMatches.map((item) => `${item.dateTime}\t-\t${item.fixture}\t${item.score}`),
     };
+  }
+
+  // Fallback: try the board-style scraper.
+  try {
+    const boardFallback = await collectBetsApiBoard(leagueUrl, safeMaxPages, options);
+    const finishedRows = boardFallback.rows.filter((item) => item.status === "finished" && SCORE_RE.test(item.score));
+    const fallbackMatches = finishedRows.map((item) => ({
+      dateTime: item.eventTime,
+      fixture: item.fixture,
+      score: item.score.replace(":", "-"),
+    }));
+
+    if (fallbackMatches.length > 0) {
+      return {
+        processedPages: Math.max(processedPages, boardFallback.processedPages),
+        matches: fallbackMatches,
+        lines: fallbackMatches.map((item) => `${item.dateTime}\t-\t${item.fixture}\t${item.score}`),
+      };
+    }
+  } catch {
+    // ignore board fallback errors
   }
 
   if (errors.length) {

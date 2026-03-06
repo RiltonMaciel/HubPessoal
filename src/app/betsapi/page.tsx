@@ -196,7 +196,7 @@ export default function BetsApiPage() {
 
   const previewRows = useMemo(() => {
     if (!result) return [];
-    return result.lines.slice(0, 30).map(parseLine);
+    return result.lines.map(parseLine);
   }, [result]);
 
   async function runCollection() {
