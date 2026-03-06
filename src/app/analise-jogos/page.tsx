@@ -212,6 +212,41 @@ type SavedPrediction = {
   probability: number;
 };
 
+type BacktestRow = {
+  matchId: string;
+  dateTime: string;
+  homeNick: string;
+  awayNick: string;
+  actualHome: number;
+  actualAway: number;
+  actualResult: "Casa" | "Empate" | "Fora";
+  predictedPick: "Casa" | "Empate" | "Fora";
+  pickHit: boolean;
+  confidence: "baixa" | "media" | "alta";
+  confidenceScore: number;
+  homeProb: number;
+  drawProb: number;
+  awayProb: number;
+  expectedGoals: number;
+  actualTotal: number;
+  overHits: { line: number; predicted: boolean; actual: boolean; hit: boolean }[];
+  bttsPredict: boolean;
+  bttsActual: boolean;
+  bttsHit: boolean;
+};
+
+type BacktestSummaryData = {
+  total: number;
+  pickHits: number;
+  pickRate: number;
+  byConfidence: { level: string; total: number; hits: number; rate: number }[];
+  overRates: { line: number; total: number; hits: number; rate: number }[];
+  bttsTotal: number;
+  bttsHits: number;
+  bttsRate: number;
+  rows: BacktestRow[];
+};
+
 type AnalysisMode = "conservador" | "agressivo";
 type SampleWindow = 5 | 10 | 20;
 
@@ -1262,6 +1297,9 @@ export default function AnaliseJogosPage() {
   const [copyMessage, setCopyMessage] = useState("");
   const [analysisMatches, setAnalysisMatches] = useState<MatchRecord[]>([]);
   const [confidenceFilter, setConfidenceFilter] = useState<"todos" | "alta" | "media" | "baixa">("todos");
+  const [backtestData, setBacktestData] = useState<BacktestSummaryData | null>(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestSample, setBacktestSample] = useState(50);
 
   const filteredInsights = useMemo(() => {
     if (confidenceFilter === "todos") return insights;
@@ -1405,6 +1443,8 @@ export default function AnaliseJogosPage() {
     if (item.homeBounceBack.signal === "forte" && item.homeStreak.lossStreak > 0) curiosities.push(`${item.fixture.homeNick} vem de derrota e tem bounce-back FORTE (${Math.round(item.homeBounceBack.bounceBackScore)}/100) — tende a reagir.`);
     if (item.awayBounceBack.signal === "forte" && item.awayStreak.lossStreak > 0) curiosities.push(`${item.fixture.awayNick} vem de derrota e tem bounce-back FORTE (${Math.round(item.awayBounceBack.bounceBackScore)}/100) — tende a reagir.`);
     if (item.revengeFactor.signal === "vingança forte") curiosities.push(`Fator vingança ativo: ${item.fixture.homeNick} costuma vencer após perder para ${item.fixture.awayNick} (${(item.revengeFactor.h2hRevengeRate * 100).toFixed(0)}%).`);
+    if (item.consensusOver25) curiosities.push("CONSENSO Over 2.5: Poisson, empírico e H2H convergem — sinal forte de jogo com gols.");
+    if (item.dangerZone) curiosities.push("DANGER ZONE: jogo extremamente equilibrado, stake mínimo recomendado.");
     if (item.homeDeep.recent.avgGoalsAgainst >= 1.8 || item.awayDeep.recent.avgGoalsAgainst >= 1.8) curiosities.push("Defesa vulnerável no recorte recente (GA/j elevado)." );
     if (!curiosities.length) curiosities.push("Sem anomalia forte; cenário mais equilibrado no recorte atual.");
     return curiosities;
@@ -1541,6 +1581,122 @@ export default function AnaliseJogosPage() {
     }
 
     window.setTimeout(() => setCopyMessage(""), 2200);
+  }
+
+  async function runBacktest() {
+    setBacktestLoading(true);
+    try {
+      const [rawMatches, aliasMap] = await Promise.all([db.matches.toArray(), getAliasMap()]);
+      const allMatches = applyAliasesToMatches(rawMatches, aliasMap);
+      const sorted = [...allMatches].sort((a, b) => +new Date(b.dateTime) - +new Date(a.dateTime));
+
+      // Pegar os N jogos mais recentes como "teste"
+      const testMatches = sorted.slice(0, backtestSample);
+      const rows: BacktestRow[] = [];
+
+      for (const testMatch of testMatches) {
+        const homeNick = testMatch.homeNick;
+        const awayNick = testMatch.awayNick;
+        const homeNickNorm = normalizeText(homeNick);
+        const awayNickNorm = normalizeText(awayNick);
+
+        // Dados históricos = todos os jogos ANTES deste jogo (treino)
+        const matchDate = +new Date(testMatch.dateTime);
+        const trainingData = allMatches.filter((m) => +new Date(m.dateTime) < matchDate);
+
+        // Precisamos de pelo menos 5 jogos de cada jogador
+        const homeCount = trainingData.filter((m) => normalizeText(m.homeNick) === homeNickNorm || normalizeText(m.awayNick) === homeNickNorm).length;
+        const awayCount = trainingData.filter((m) => normalizeText(m.homeNick) === awayNickNorm || normalizeText(m.awayNick) === awayNickNorm).length;
+        if (homeCount < 5 || awayCount < 5) continue;
+
+        // Simular fixture
+        const fixture: ParsedFixture = {
+          id: testMatch.id,
+          labelTime: "",
+          homeTeam: testMatch.homeTeam,
+          homeNick: homeNick,
+          awayTeam: testMatch.awayTeam,
+          awayNick: awayNick,
+          oddHome: testMatch.oddHomeClose,
+          oddDraw: testMatch.oddDrawClose,
+          oddAway: testMatch.oddAwayClose,
+        };
+
+        const insightArr = buildInsights([fixture], trainingData, mode, sampleWindow);
+        if (!insightArr.length) continue;
+        const insight = insightArr[0];
+
+        const actualTotal = testMatch.homeGoals + testMatch.awayGoals;
+        const actualResult: "Casa" | "Empate" | "Fora" =
+          testMatch.homeGoals > testMatch.awayGoals ? "Casa"
+          : testMatch.homeGoals < testMatch.awayGoals ? "Fora" : "Empate";
+
+        const overLines = [1.5, 2.5, 3.5, 4.5];
+        const overHits = overLines.map((line) => {
+          const op = insight.overProbs.find((r) => r.line === line);
+          const predicted = (op?.blended ?? 0) >= 0.50;
+          const actual = actualTotal > line;
+          return { line, predicted, actual, hit: predicted === actual };
+        });
+
+        const bttsActual = testMatch.homeGoals > 0 && testMatch.awayGoals > 0;
+        const bttsPredict = insight.bttsProb >= 0.50;
+
+        rows.push({
+          matchId: testMatch.id,
+          dateTime: testMatch.dateTime,
+          homeNick,
+          awayNick,
+          actualHome: testMatch.homeGoals,
+          actualAway: testMatch.awayGoals,
+          actualResult,
+          predictedPick: insight.pick,
+          pickHit: insight.pick === actualResult,
+          confidence: insight.confidence,
+          confidenceScore: insight.confidenceScore,
+          homeProb: insight.homeProb,
+          drawProb: insight.drawProb,
+          awayProb: insight.awayProb,
+          expectedGoals: insight.expectedGoals,
+          actualTotal,
+          overHits,
+          bttsPredict,
+          bttsActual,
+          bttsHit: bttsPredict === bttsActual,
+        });
+      }
+
+      const pickHits = rows.filter((r) => r.pickHit).length;
+      const byLevels = ["alta", "media", "baixa"] as const;
+      const byConfidence = byLevels.map((level) => {
+        const sub = rows.filter((r) => r.confidence === level);
+        const hits = sub.filter((r) => r.pickHit).length;
+        return { level, total: sub.length, hits, rate: sub.length ? hits / sub.length : 0 };
+      });
+
+      const overRates = [1.5, 2.5, 3.5, 4.5].map((line) => {
+        const hits = rows.filter((r) => r.overHits.find((o) => o.line === line)?.hit).length;
+        return { line, total: rows.length, hits, rate: rows.length ? hits / rows.length : 0 };
+      });
+
+      const bttsHits = rows.filter((r) => r.bttsHit).length;
+
+      setBacktestData({
+        total: rows.length,
+        pickHits,
+        pickRate: rows.length ? pickHits / rows.length : 0,
+        byConfidence,
+        overRates,
+        bttsTotal: rows.length,
+        bttsHits,
+        bttsRate: rows.length ? bttsHits / rows.length : 0,
+        rows,
+      });
+    } catch {
+      setBacktestData(null);
+    } finally {
+      setBacktestLoading(false);
+    }
   }
 
   return (
@@ -2284,6 +2440,147 @@ export default function AnaliseJogosPage() {
           })()}
         </div>
       )}
+
+      <Card className="col-12">
+        <CardHeader>
+          <div>
+            <h3>Backtest — Acurácia do motor</h3>
+            <small>Simula as previsões nos jogos recentes da base e compara com o resultado real. Quanto mais jogos, mais confiável.</small>
+          </div>
+          {backtestData && <Badge tone={backtestData.pickRate >= 0.55 ? "good" : backtestData.pickRate >= 0.40 ? "warn" : "bad"}>{(backtestData.pickRate * 100).toFixed(1)}% acerto 1X2</Badge>}
+        </CardHeader>
+        <CardBody>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+            <select
+              className="select"
+              value={backtestSample}
+              onChange={(e) => setBacktestSample(Number(e.target.value))}
+              aria-label="Quantidade de jogos"
+            >
+              <option value={25}>Últimos 25 jogos</option>
+              <option value={50}>Últimos 50 jogos</option>
+              <option value={100}>Últimos 100 jogos</option>
+              <option value={200}>Últimos 200 jogos</option>
+            </select>
+            <Button variant="primary" onClick={runBacktest} disabled={backtestLoading}>
+              {backtestLoading ? "Calculando..." : "Rodar backtest"}
+            </Button>
+            <span className="mini">Modo: {mode} | Janela: {sampleWindow}</span>
+          </div>
+
+          {backtestData && (
+            <div style={{ display: "grid", gap: 16 }}>
+              {/* Resumo geral */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
+                <div className="card" style={{ padding: 12, textAlign: "center" }}>
+                  <div className="mini" style={{ fontWeight: 700 }}>Jogos testados</div>
+                  <div style={{ fontSize: 22, fontWeight: 700 }}>{backtestData.total}</div>
+                </div>
+                <div className="card" style={{ padding: 12, textAlign: "center" }}>
+                  <div className="mini" style={{ fontWeight: 700 }}>Acerto 1X2</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: backtestData.pickRate >= 0.55 ? "var(--badge-good-bg, #22c55e)" : backtestData.pickRate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }}>
+                    {(backtestData.pickRate * 100).toFixed(1)}%
+                  </div>
+                  <div className="mini">{backtestData.pickHits}/{backtestData.total}</div>
+                </div>
+                <div className="card" style={{ padding: 12, textAlign: "center" }}>
+                  <div className="mini" style={{ fontWeight: 700 }}>BTTS acerto</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: backtestData.bttsRate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : backtestData.bttsRate >= 0.45 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }}>
+                    {(backtestData.bttsRate * 100).toFixed(1)}%
+                  </div>
+                  <div className="mini">{backtestData.bttsHits}/{backtestData.bttsTotal}</div>
+                </div>
+              </div>
+
+              {/* Acerto por confiança */}
+              <div className="card" style={{ padding: 12 }}>
+                <strong>Acerto 1X2 por nível de confiança</strong>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginTop: 10 }}>
+                  {backtestData.byConfidence.map((c) => (
+                    <div key={c.level} style={{ textAlign: "center", padding: 10, borderRadius: 8, background: "rgba(255,255,255,.03)" }}>
+                      <div className="mini" style={{ fontWeight: 700, textTransform: "uppercase" }}>{c.level}</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: c.rate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : c.rate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }}>
+                        {c.total ? `${(c.rate * 100).toFixed(1)}%` : "-"}
+                      </div>
+                      <div className="mini">{c.hits}/{c.total} jogos</div>
+                      <div style={{ background: "rgba(255,255,255,.08)", borderRadius: 4, height: 6, marginTop: 6, overflow: "hidden" }}>
+                        <div style={{ width: `${c.rate * 100}%`, height: "100%", borderRadius: 4, background: c.rate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : c.rate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Acerto por linha de over */}
+              <div className="card" style={{ padding: 12 }}>
+                <strong>Acerto de Over por linha</strong>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 10 }}>
+                  {backtestData.overRates.map((o) => (
+                    <div key={o.line} style={{ textAlign: "center", padding: 10, borderRadius: 8, background: "rgba(255,255,255,.03)" }}>
+                      <div className="mini" style={{ fontWeight: 700 }}>Over {o.line}</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: o.rate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : o.rate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }}>
+                        {(o.rate * 100).toFixed(1)}%
+                      </div>
+                      <div className="mini">{o.hits}/{o.total}</div>
+                      <div style={{ background: "rgba(255,255,255,.08)", borderRadius: 4, height: 6, marginTop: 6, overflow: "hidden" }}>
+                        <div style={{ width: `${o.rate * 100}%`, height: "100%", borderRadius: 4, background: o.rate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : o.rate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tabela detalhada dos últimos jogos do backtest */}
+              <div className="card" style={{ padding: 12 }}>
+                <strong>Detalhamento jogo a jogo (últimos 20)</strong>
+                <div style={{ overflowX: "auto", marginTop: 8 }}>
+                  <Table>
+                    <thead>
+                      <tr>
+                        <th>Data</th>
+                        <th>Confronto</th>
+                        <th>Placar real</th>
+                        <th>Previsão</th>
+                        <th>Real</th>
+                        <th>1X2</th>
+                        <th>Conf.</th>
+                        <th>O 1.5</th>
+                        <th>O 2.5</th>
+                        <th>O 3.5</th>
+                        <th>O 4.5</th>
+                        <th>BTTS</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {backtestData.rows.slice(0, 20).map((r) => (
+                        <tr key={r.matchId}>
+                          <td className="mini">{new Date(r.dateTime).toLocaleDateString("pt-BR")}</td>
+                          <td>
+                            <span style={{ fontSize: 12, fontWeight: 600 }}>{r.homeNick} x {r.awayNick}</span>
+                          </td>
+                          <td style={{ fontWeight: 700 }}>{r.actualHome}-{r.actualAway}</td>
+                          <td><span className="badge">{r.predictedPick}</span></td>
+                          <td><span className="badge">{r.actualResult}</span></td>
+                          <td><span className={`badge ${r.pickHit ? "good" : "bad"}`}>{r.pickHit ? "OK" : "MISS"}</span></td>
+                          <td><span className={`badge ${r.confidence === "alta" ? "good" : r.confidence === "media" ? "warn" : "bad"}`}>{r.confidence}</span></td>
+                          {r.overHits.map((o) => (
+                            <td key={o.line}><span className={`badge ${o.hit ? "good" : "bad"}`}>{o.hit ? "OK" : "X"}</span></td>
+                          ))}
+                          <td><span className={`badge ${r.bttsHit ? "good" : "bad"}`}>{r.bttsHit ? "OK" : "X"}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!backtestData && !backtestLoading && (
+            <EmptyState title="Nenhum backtest rodado" subtitle="Clique em 'Rodar backtest' para simular previsões nos jogos recentes e ver a acurácia." />
+          )}
+        </CardBody>
+      </Card>
 
       <Card className="col-12">
         <CardHeader>
