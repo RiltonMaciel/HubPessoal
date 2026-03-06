@@ -30,6 +30,29 @@ type MarketInsight = {
   signal: "over" | "under";
 };
 
+type H2hGame = {
+  dateTime: string;
+  homeNick: string;
+  awayNick: string;
+  homeGoals: number;
+  awayGoals: number;
+  result: "V" | "E" | "D";
+};
+
+type MostLikelyScore = {
+  home: number;
+  away: number;
+  probability: number;
+};
+
+type PlayerStreak = {
+  winStreak: number;
+  lossStreak: number;
+  unbeatenStreak: number;
+  scoringStreak: number;
+  cleanSheetStreak: number;
+};
+
 type MatchInsight = {
   fixture: ParsedFixture;
   sampleHome: number;
@@ -44,6 +67,8 @@ type MatchInsight = {
   valueEdgePp: number | null;
   isValueBet: boolean;
   expectedGoals: number;
+  expectedHomeGoals: number;
+  expectedAwayGoals: number;
   bttsProb: number;
   markets: MarketInsight[];
   reasons: string[];
@@ -55,6 +80,63 @@ type MatchInsight = {
     awayAvgConceded: number;
     reason: string;
   };
+  h2hGames: H2hGame[];
+  h2hHomeWins: number;
+  h2hDraws: number;
+  h2hAwayWins: number;
+  h2hAvgGoals: number;
+  h2hBttsRate: number;
+  h2hOverRates: { line: number; rate: number }[];
+  homeStreak: PlayerStreak;
+  awayStreak: PlayerStreak;
+  mostLikelyScores: MostLikelyScore[];
+  homeIndividualStats: PlayerIndividualStats;
+  awayIndividualStats: PlayerIndividualStats;
+  confidenceDiag: ConfidenceDiag;
+  homeBounceBack: BounceBackProfile;
+  awayBounceBack: BounceBackProfile;
+  revengeFactor: RevengeFactor;
+};
+
+type PlayerIndividualStats = {
+  bttsRate: number;
+  overRates: { line: number; rate: number }[];
+  avgTotalGoals: number;
+  cleanSheetRate: number;
+  scoringRate: number;
+};
+
+type ConfidenceDiag = {
+  sampleScore: number;
+  formDiffScore: number;
+  h2hScore: number;
+  edgeScore: number;
+  overall: number;
+  reasons: string[];
+};
+
+type BounceBackProfile = {
+  postLossWinRate: number;
+  postLossDrawRate: number;
+  postLossAvgGf: number;
+  postLossAvgGa: number;
+  postLossGames: number;
+  postCloseDefeatWinRate: number;
+  postCloseDefeatGames: number;
+  postHeavyDefeatWinRate: number;
+  postHeavyDefeatGames: number;
+  ppgAfterLoss3: number;
+  ppgOverall: number;
+  momentumShift: number;
+  bounceBackScore: number;
+  signal: string;
+};
+
+type RevengeFactor = {
+  h2hRevengeRate: number;
+  h2hRevengeGames: number;
+  h2hRevengeAvgGf: number;
+  signal: string;
 };
 
 type PlayerWindow = {
@@ -67,6 +149,10 @@ type PlayerWindow = {
   ppg: number;
   winRate: number;
   avgTotal: number;
+  bttsRate: number;
+  overRates: { line: number; rate: number }[];
+  cleanSheetRate: number;
+  scoringRate: number;
 };
 
 type TeamPeak = {
@@ -211,6 +297,214 @@ function poissonCdf(lambda: number, maxGoals: number) {
   let total = 0;
   for (let g = 0; g <= maxGoals; g += 1) total += poissonPmf(lambda, g);
   return total;
+}
+
+function computeStreak(matches: MatchRecord[], nick: string): PlayerStreak {
+  const target = normalizeText(nick);
+  const rows = matches
+    .filter((m) => normalizeText(m.homeNick) === target || normalizeText(m.awayNick) === target)
+    .sort((a, b) => +new Date(b.dateTime) - +new Date(a.dateTime));
+
+  let winStreak = 0;
+  let lossStreak = 0;
+  let unbeatenStreak = 0;
+  let scoringStreak = 0;
+  let cleanSheetStreak = 0;
+  let winDone = false;
+  let lossDone = false;
+  let unbeatenDone = false;
+  let scoringDone = false;
+  let cleanDone = false;
+
+  for (const row of rows) {
+    const isHome = normalizeText(row.homeNick) === target;
+    const gf = isHome ? row.homeGoals : row.awayGoals;
+    const ga = isHome ? row.awayGoals : row.homeGoals;
+    const won = gf > ga;
+    const drew = gf === ga;
+    const lost = gf < ga;
+
+    if (!winDone) { if (won) winStreak += 1; else winDone = true; }
+    if (!lossDone) { if (lost) lossStreak += 1; else lossDone = true; }
+    if (!unbeatenDone) { if (!lost) unbeatenStreak += 1; else unbeatenDone = true; }
+    if (!scoringDone) { if (gf > 0) scoringStreak += 1; else scoringDone = true; }
+    if (!cleanDone) { if (ga === 0) cleanSheetStreak += 1; else cleanDone = true; }
+
+    if (winDone && lossDone && unbeatenDone && scoringDone && cleanDone) break;
+  }
+
+  return { winStreak, lossStreak, unbeatenStreak, scoringStreak, cleanSheetStreak };
+}
+
+function computeMostLikelyScores(lambdaHome: number, lambdaAway: number): MostLikelyScore[] {
+  const scores: MostLikelyScore[] = [];
+  for (let h = 0; h <= 6; h += 1) {
+    for (let a = 0; a <= 6; a += 1) {
+      scores.push({ home: h, away: a, probability: poissonPmf(lambdaHome, h) * poissonPmf(lambdaAway, a) });
+    }
+  }
+  return scores.sort((x, y) => y.probability - x.probability).slice(0, 5);
+}
+
+function computeBounceBack(matches: MatchRecord[], nick: string): BounceBackProfile {
+  const target = normalizeText(nick);
+  const rows = matches
+    .filter((m) => normalizeText(m.homeNick) === target || normalizeText(m.awayNick) === target)
+    .sort((a, b) => +new Date(a.dateTime) - +new Date(b.dateTime));
+
+  let postLossWins = 0;
+  let postLossDraws = 0;
+  let postLossGf = 0;
+  let postLossGa = 0;
+  let postLossGames = 0;
+  let postCloseWins = 0;
+  let postCloseGames = 0;
+  let postHeavyWins = 0;
+  let postHeavyGames = 0;
+  let totalPoints = 0;
+  let postLossPointsIn3 = 0;
+  let postLossWindowCount = 0;
+
+  for (let i = 1; i < rows.length; i += 1) {
+    const prev = rows[i - 1];
+    const curr = rows[i];
+    const prevIsHome = normalizeText(prev.homeNick) === target;
+    const prevGf = prevIsHome ? prev.homeGoals : prev.awayGoals;
+    const prevGa = prevIsHome ? prev.awayGoals : prev.homeGoals;
+    const prevLost = prevGf < prevGa;
+    const prevMargin = prevGa - prevGf;
+
+    const currIsHome = normalizeText(curr.homeNick) === target;
+    const currGf = currIsHome ? curr.homeGoals : curr.awayGoals;
+    const currGa = currIsHome ? curr.awayGoals : curr.homeGoals;
+    const currWon = currGf > currGa;
+    const currDrew = currGf === currGa;
+    const currPts = currWon ? 3 : currDrew ? 1 : 0;
+    totalPoints += currPts;
+
+    if (prevLost) {
+      postLossGames += 1;
+      postLossGf += currGf;
+      postLossGa += currGa;
+      if (currWon) postLossWins += 1;
+      if (currDrew) postLossDraws += 1;
+
+      if (prevMargin === 1) {
+        postCloseGames += 1;
+        if (currWon) postCloseWins += 1;
+      } else if (prevMargin >= 2) {
+        postHeavyGames += 1;
+        if (currWon) postHeavyWins += 1;
+      }
+
+      // PPG nos 3 jogos seguintes à derrota
+      let windowPts = 0;
+      let windowCount = 0;
+      for (let j = i; j < Math.min(i + 3, rows.length); j += 1) {
+        const r = rows[j];
+        const rIsHome = normalizeText(r.homeNick) === target;
+        const rGf = rIsHome ? r.homeGoals : r.awayGoals;
+        const rGa = rIsHome ? r.awayGoals : r.homeGoals;
+        windowPts += rGf > rGa ? 3 : rGf === rGa ? 1 : 0;
+        windowCount += 1;
+      }
+      if (windowCount > 0) {
+        postLossPointsIn3 += windowPts / windowCount;
+        postLossWindowCount += 1;
+      }
+    }
+  }
+
+  const ppgOverall = rows.length > 1 ? totalPoints / (rows.length - 1) : 0;
+  const ppgAfterLoss3 = postLossWindowCount > 0 ? postLossPointsIn3 / postLossWindowCount : 0;
+  const momentumShift = ppgAfterLoss3 - ppgOverall;
+
+  const postLossWinRate = postLossGames > 0 ? postLossWins / postLossGames : 0;
+  const postLossDrawRate = postLossGames > 0 ? postLossDraws / postLossGames : 0;
+
+  // Bounce-back score: 0-100
+  let bbs = 0;
+  bbs += clamp(postLossWinRate * 50, 0, 50);
+  bbs += clamp(momentumShift * 20, -10, 25);
+  bbs += postLossGames >= 5 ? 15 : postLossGames >= 3 ? 8 : 0;
+  bbs += postLossGf > postLossGa ? 10 : 0;
+  bbs = clamp(bbs, 0, 100);
+
+  let signal = "neutro";
+  if (bbs >= 65) signal = "forte";
+  else if (bbs >= 40) signal = "moderado";
+  else if (postLossGames >= 3) signal = "fraco";
+
+  return {
+    postLossWinRate,
+    postLossDrawRate,
+    postLossAvgGf: postLossGames > 0 ? postLossGf / postLossGames : 0,
+    postLossAvgGa: postLossGames > 0 ? postLossGa / postLossGames : 0,
+    postLossGames,
+    postCloseDefeatWinRate: postCloseGames > 0 ? postCloseWins / postCloseGames : 0,
+    postCloseDefeatGames: postCloseGames,
+    postHeavyDefeatWinRate: postHeavyGames > 0 ? postHeavyWins / postHeavyGames : 0,
+    postHeavyDefeatGames: postHeavyGames,
+    ppgAfterLoss3,
+    ppgOverall,
+    momentumShift,
+    bounceBackScore: bbs,
+    signal,
+  };
+}
+
+function computeRevengeFactor(
+  matches: MatchRecord[],
+  nickA: string,
+  nickB: string,
+): RevengeFactor {
+  const targetA = normalizeText(nickA);
+  const targetB = normalizeText(nickB);
+
+  const h2hRows = matches
+    .filter((m) => {
+      const h = normalizeText(m.homeNick);
+      const a = normalizeText(m.awayNick);
+      return (h === targetA && a === targetB) || (h === targetB && a === targetA);
+    })
+    .sort((a, b) => +new Date(a.dateTime) - +new Date(b.dateTime));
+
+  let revengeWins = 0;
+  let revengeGames = 0;
+  let revengeGf = 0;
+
+  for (let i = 1; i < h2hRows.length; i += 1) {
+    const prev = h2hRows[i - 1];
+    const curr = h2hRows[i];
+    const prevIsHomeA = normalizeText(prev.homeNick) === targetA;
+    const prevGfA = prevIsHomeA ? prev.homeGoals : prev.awayGoals;
+    const prevGaA = prevIsHomeA ? prev.awayGoals : prev.homeGoals;
+    const aLostPrev = prevGfA < prevGaA;
+
+    const currIsHomeA = normalizeText(curr.homeNick) === targetA;
+    const currGfA = currIsHomeA ? curr.homeGoals : curr.awayGoals;
+    const currGaA = currIsHomeA ? curr.awayGoals : curr.homeGoals;
+    const aWonCurr = currGfA > currGaA;
+
+    if (aLostPrev) {
+      revengeGames += 1;
+      revengeGf += currGfA;
+      if (aWonCurr) revengeWins += 1;
+    }
+  }
+
+  const rate = revengeGames > 0 ? revengeWins / revengeGames : 0;
+  let signal = "sem dados";
+  if (revengeGames >= 3 && rate >= 0.6) signal = "vingança forte";
+  else if (revengeGames >= 2 && rate >= 0.5) signal = "vingança moderada";
+  else if (revengeGames >= 2) signal = "sem padrão claro";
+
+  return {
+    h2hRevengeRate: rate,
+    h2hRevengeGames: revengeGames,
+    h2hRevengeAvgGf: revengeGames > 0 ? revengeGf / revengeGames : 0,
+    signal,
+  };
 }
 
 function impliedFromOdds(oddHome?: number, oddDraw?: number, oddAway?: number) {
@@ -365,6 +659,10 @@ function playerWindow(matches: MatchRecord[], nick: string, limit = 25): PlayerW
       ppg: 0,
       winRate: 0,
       avgTotal: 0,
+      bttsRate: 0,
+      overRates: [{ line: 0.5, rate: 0 }, { line: 1.5, rate: 0 }, { line: 2.5, rate: 0 }, { line: 3.5, rate: 0 }, { line: 4.5, rate: 0 }],
+      cleanSheetRate: 0,
+      scoringRate: 0,
     };
   }
 
@@ -373,11 +671,16 @@ function playerWindow(matches: MatchRecord[], nick: string, limit = 25): PlayerW
   let losses = 0;
   let gf = 0;
   let ga = 0;
+  let bttsCount = 0;
+  let cleanSheetCount = 0;
+  let scoringCount = 0;
+  const overCounts = [0, 0, 0, 0, 0]; // 0.5, 1.5, 2.5, 3.5, 4.5
 
   for (const row of rows) {
     const isHome = normalizeText(row.homeNick) === normalizedNick;
     const goalsFor = isHome ? row.homeGoals : row.awayGoals;
     const goalsAgainst = isHome ? row.awayGoals : row.homeGoals;
+    const total = goalsFor + goalsAgainst;
 
     gf += goalsFor;
     ga += goalsAgainst;
@@ -385,8 +688,18 @@ function playerWindow(matches: MatchRecord[], nick: string, limit = 25): PlayerW
     if (goalsFor > goalsAgainst) wins += 1;
     else if (goalsFor === goalsAgainst) draws += 1;
     else losses += 1;
+
+    if (goalsFor > 0 && goalsAgainst > 0) bttsCount += 1;
+    if (goalsAgainst === 0) cleanSheetCount += 1;
+    if (goalsFor > 0) scoringCount += 1;
+    if (total > 0.5) overCounts[0] += 1;
+    if (total > 1.5) overCounts[1] += 1;
+    if (total > 2.5) overCounts[2] += 1;
+    if (total > 3.5) overCounts[3] += 1;
+    if (total > 4.5) overCounts[4] += 1;
   }
 
+  const lines = [0.5, 1.5, 2.5, 3.5, 4.5];
   const points = wins * 3 + draws;
   return {
     games: rows.length,
@@ -398,6 +711,10 @@ function playerWindow(matches: MatchRecord[], nick: string, limit = 25): PlayerW
     ppg: points / rows.length,
     winRate: wins / rows.length,
     avgTotal: (gf + ga) / rows.length,
+    bttsRate: bttsCount / rows.length,
+    overRates: lines.map((line, i) => ({ line, rate: overCounts[i] / rows.length })),
+    cleanSheetRate: cleanSheetCount / rows.length,
+    scoringRate: scoringCount / rows.length,
   };
 }
 
@@ -608,17 +925,64 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
 
     let homeH2hPoints = 0;
     let awayH2hPoints = 0;
+    let h2hHomeWins = 0;
+    let h2hDraws = 0;
+    let h2hAwayWins = 0;
+    let h2hTotalGoals = 0;
+    let h2hBttsCount = 0;
+    const h2hGamesList: H2hGame[] = [];
+
     for (const row of h2hRows) {
       const homeIsHomeSide = normalizeText(row.homeNick) === homeNickNorm;
       const homeGoals = homeIsHomeSide ? row.homeGoals : row.awayGoals;
       const awayGoals = homeIsHomeSide ? row.awayGoals : row.homeGoals;
-      if (homeGoals > awayGoals) homeH2hPoints += 3;
-      else if (homeGoals < awayGoals) awayH2hPoints += 3;
-      else {
-        homeH2hPoints += 1;
-        awayH2hPoints += 1;
-      }
+      if (homeGoals > awayGoals) { homeH2hPoints += 3; h2hHomeWins += 1; }
+      else if (homeGoals < awayGoals) { awayH2hPoints += 3; h2hAwayWins += 1; }
+      else { homeH2hPoints += 1; awayH2hPoints += 1; h2hDraws += 1; }
+      h2hTotalGoals += homeGoals + awayGoals;
+      if (homeGoals > 0 && awayGoals > 0) h2hBttsCount += 1;
+      h2hGamesList.push({
+        dateTime: row.dateTime,
+        homeNick: homeIsHomeSide ? fixture.homeNick : fixture.awayNick,
+        awayNick: homeIsHomeSide ? fixture.awayNick : fixture.homeNick,
+        homeGoals,
+        awayGoals,
+        result: homeGoals > awayGoals ? "V" : homeGoals === awayGoals ? "E" : "D",
+      });
     }
+
+    const h2hAvgGoals = h2hRows.length ? h2hTotalGoals / h2hRows.length : 0;
+    const h2hBttsRate = h2hRows.length ? h2hBttsCount / h2hRows.length : 0;
+
+    // H2H over rates por linha
+    const h2hOverLines = [0.5, 1.5, 2.5, 3.5, 4.5];
+    const h2hOverRates = h2hOverLines.map((line) => {
+      if (!h2hRows.length) return { line, rate: 0 };
+      const count = h2hGamesList.filter((g) => g.homeGoals + g.awayGoals > line).length;
+      return { line, rate: count / h2hRows.length };
+    });
+
+    // Individual stats
+    const homeIndividualStats: PlayerIndividualStats = {
+      bttsRate: home.bttsRate,
+      overRates: home.overRates,
+      avgTotalGoals: home.avgTotal,
+      cleanSheetRate: home.cleanSheetRate,
+      scoringRate: home.scoringRate,
+    };
+    const awayIndividualStats: PlayerIndividualStats = {
+      bttsRate: away.bttsRate,
+      overRates: away.overRates,
+      avgTotalGoals: away.avgTotal,
+      cleanSheetRate: away.cleanSheetRate,
+      scoringRate: away.scoringRate,
+    };
+
+    const homeStreak = computeStreak(allMatches, fixture.homeNick);
+    const awayStreak = computeStreak(allMatches, fixture.awayNick);
+    const homeBounceBack = computeBounceBack(allMatches, fixture.homeNick);
+    const awayBounceBack = computeBounceBack(allMatches, fixture.awayNick);
+    const revengeFactor = computeRevengeFactor(allMatches, fixture.homeNick, fixture.awayNick);
 
     const formDiff = (home.ppg - away.ppg) / 3;
     const winDiff = home.winRate - away.winRate;
@@ -655,6 +1019,7 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const expectedHomeGoals = clamp((home.gf + away.ga) / 2, 0.45, 5.2);
     const expectedAwayGoals = clamp((away.gf + home.ga) / 2, 0.45, 5.2);
     const expectedGoals = expectedHomeGoals + expectedAwayGoals;
+    const mostLikelyScores = computeMostLikelyScores(expectedHomeGoals, expectedAwayGoals);
 
     const over25 = 1 - poissonCdf(expectedGoals, 2);
     const over35 = 1 - poissonCdf(expectedGoals, 3);
@@ -709,6 +1074,32 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const valueEdgePp = impliedPick == null ? null : (top.value - impliedPick) * 100;
     const isValueBet = valueEdgePp != null && valueEdgePp >= profile.minValueEdgePp;
 
+    // Diagnóstico de confiança
+    const sampleScore = clamp(Math.min(home.games, away.games) / sampleWindow * 40, 0, 40);
+    const formDiffScoreDiag = clamp(Math.abs(home.ppg - away.ppg) / 3 * 25, 0, 25);
+    const h2hScoreDiag = clamp(h2hRows.length >= 3 ? 15 : h2hRows.length >= 1 ? 8 : 0, 0, 15);
+    const edgeScoreDiag = clamp(edge * 100 * 0.2, 0, 20);
+    const overallDiag = sampleScore + formDiffScoreDiag + h2hScoreDiag + edgeScoreDiag;
+    const diagReasons: string[] = [];
+    if (sampleScore >= 30) diagReasons.push(`Boa amostra (${Math.min(home.games, away.games)}/${sampleWindow} jogos)`);
+    else diagReasons.push(`Amostra limitada (${Math.min(home.games, away.games)}/${sampleWindow} jogos) — reduz confiança`);
+    if (formDiffScoreDiag >= 15) diagReasons.push(`Diferença de forma significativa (${Math.abs(home.ppg - away.ppg).toFixed(2)} PPG)`);
+    else diagReasons.push(`Forma dos jogadores semelhante — dificulta previsão`);
+    if (h2hScoreDiag >= 15) diagReasons.push(`H2H robusto com ${h2hRows.length} confrontos diretos`);
+    else if (h2hRows.length > 0) diagReasons.push(`H2H com apenas ${h2hRows.length} jogo(s) — peso reduzido`);
+    else diagReasons.push(`Sem H2H direto — previsão baseada apenas em forma geral`);
+    if (edgeScoreDiag >= 10) diagReasons.push(`Edge claro entre favorito e adversário`);
+    else diagReasons.push(`Jogo equilibrado sem edge dominante`);
+
+    const confidenceDiag: ConfidenceDiag = {
+      sampleScore,
+      formDiffScore: formDiffScoreDiag,
+      h2hScore: h2hScoreDiag,
+      edgeScore: edgeScoreDiag,
+      overall: overallDiag,
+      reasons: diagReasons,
+    };
+
     const reasons = [
       `Forma recente ${fixture.homeNick} ${home.ppg.toFixed(2)} PPG vs ${fixture.awayNick} ${away.ppg.toFixed(2)} PPG.`,
       `Amostra: ${home.games} jogos (${fixture.homeNick}) e ${away.games} jogos (${fixture.awayNick}) na base local.`,
@@ -734,6 +1125,8 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
       valueEdgePp,
       isValueBet,
       expectedGoals,
+      expectedHomeGoals,
+      expectedAwayGoals,
       bttsProb,
       markets,
       reasons,
@@ -745,6 +1138,22 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
         awayAvgConceded: awayCurrentConceded,
         reason: overAlertReason,
       },
+      h2hGames: h2hGamesList,
+      h2hHomeWins,
+      h2hDraws,
+      h2hAwayWins,
+      h2hAvgGoals,
+      h2hBttsRate,
+      h2hOverRates,
+      homeStreak,
+      awayStreak,
+      mostLikelyScores,
+      homeIndividualStats,
+      awayIndividualStats,
+      confidenceDiag,
+      homeBounceBack,
+      awayBounceBack,
+      revengeFactor,
     };
   });
 }
@@ -898,6 +1307,9 @@ export default function AnaliseJogosPage() {
     if (item.awayDeep.recent.ppg >= 2) curiosities.push(`${item.fixture.awayNick} em fase forte no recorte (${item.awayDeep.recent.ppg.toFixed(2)} PPG).`);
     if (item.homeDeep.recovery.signal) curiosities.push(`${item.fixture.homeNick} com sinal de recuperação (${Math.round(item.homeDeep.recovery.score)}/100).`);
     if (item.awayDeep.recovery.signal) curiosities.push(`${item.fixture.awayNick} com sinal de recuperação (${Math.round(item.awayDeep.recovery.score)}/100).`);
+    if (item.homeBounceBack.signal === "forte" && item.homeStreak.lossStreak > 0) curiosities.push(`${item.fixture.homeNick} vem de derrota e tem bounce-back FORTE (${Math.round(item.homeBounceBack.bounceBackScore)}/100) — tende a reagir.`);
+    if (item.awayBounceBack.signal === "forte" && item.awayStreak.lossStreak > 0) curiosities.push(`${item.fixture.awayNick} vem de derrota e tem bounce-back FORTE (${Math.round(item.awayBounceBack.bounceBackScore)}/100) — tende a reagir.`);
+    if (item.revengeFactor.signal === "vingança forte") curiosities.push(`Fator vingança ativo: ${item.fixture.homeNick} costuma vencer após perder para ${item.fixture.awayNick} (${(item.revengeFactor.h2hRevengeRate * 100).toFixed(0)}%).`);
     if (item.homeDeep.recent.avgGoalsAgainst >= 1.8 || item.awayDeep.recent.avgGoalsAgainst >= 1.8) curiosities.push("Defesa vulnerável no recorte recente (GA/j elevado)." );
     if (!curiosities.length) curiosities.push("Sem anomalia forte; cenário mais equilibrado no recorte atual.");
     return curiosities;
@@ -1327,17 +1739,18 @@ export default function AnaliseJogosPage() {
           {(() => {
             const risk = buildRiskSignal(detailItem);
             const whyLines = buildWhySuggestion(detailItem);
+            const implied = impliedFromOdds(detailItem.fixture.oddHome, detailItem.fixture.oddDraw, detailItem.fixture.oddAway);
 
             return (
           <div
             className="card"
-            style={{ width: "min(980px, 100%)", maxHeight: "90vh", overflow: "auto", padding: 16 }}
+            style={{ width: "min(1080px, 100%)", maxHeight: "90vh", overflow: "auto", padding: 16 }}
             onClick={(event) => event.stopPropagation()}
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 }}>
               <div>
                 <h3 style={{ margin: 0 }}>{detailItem.fixture.homeNick} x {detailItem.fixture.awayNick}</h3>
-                <small className="mini">Detalhe completo usando os últimos {sampleWindow} jogos</small>
+                <small className="mini">{detailItem.fixture.homeTeam} x {detailItem.fixture.awayTeam} • {detailItem.fixture.labelTime} • Últimos {sampleWindow} jogos</small>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Button variant="primary" onClick={() => goToH2hWithDetail(detailItem)}>Ir para confronto</Button>
@@ -1348,19 +1761,9 @@ export default function AnaliseJogosPage() {
 
             {!!copyMessage && <div className="mini" style={{ marginBottom: 10 }}>{copyMessage}</div>}
 
-            <div style={{ display: "grid", gap: 10 }}>
-              {(() => {
-                const summary = buildDirectSummary(detailItem);
-                return (
-                  <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
-                    <span className="mini"><strong>? Comparativo direto:</strong> Ataque {detailItem.fixture.homeNick} vs {detailItem.fixture.awayNick}: {summary.attackGap >= 0 ? "+" : ""}{summary.attackGap.toFixed(2)} gol/j.</span>
-                    <span className="mini"><strong>? Defesa comparada:</strong> vantagem defensiva estimada {summary.defenseGap >= 0 ? "+" : ""}{summary.defenseGap.toFixed(2)}.</span>
-                    <span className="mini"><strong>? Tendência geral:</strong> {summary.trendScore >= 0 ? "favorável" : "cautela"} ({summary.trendScore.toFixed(1)}).</span>
-                    <span className="mini"><strong>? Cenário sugerido:</strong> {summary.bestScenario}.</span>
-                  </div>
-                );
-              })()}
+            <div style={{ display: "grid", gap: 12 }}>
 
+              {/* === SEÇÃO 1: Badges principais === */}
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <span className="badge">Pick: {detailItem.pick}</span>
                 <span className="badge">Força: {Math.round(detailItem.confidenceScore)}</span>
@@ -1369,43 +1772,275 @@ export default function AnaliseJogosPage() {
                   {detailItem.valueEdgePp == null ? "Vantagem: sem odd" : `Vantagem: ${detailItem.valueEdgePp.toFixed(1)}pp`}
                 </span>
                 <span className={`badge ${detailItem.overAlert.active ? "warn" : "neutral"}`}>{detailItem.overAlert.active ? "ALERTA DE OVER" : "Sem alerta de over"}</span>
+                <span className="badge">Gols esperados: {detailItem.expectedGoals.toFixed(2)}</span>
+                <span className="badge">BTTS: {(detailItem.bttsProb * 100).toFixed(0)}%</span>
               </div>
 
-              <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
-                <span className="mini"><strong>? Semáforo de risco:</strong> {risk.reason}</span>
-                <span className="mini"><strong>? Por que da sugestão:</strong></span>
-                <ul style={{ margin: "0 0 0 18px", padding: 0, display: "grid", gap: 6 }}>
-                  {whyLines.map((line) => (
-                    <li key={line} className="mini">{line}</li>
+              {/* === SEÇÃO 2: Probabilidades estimadas vs odds === */}
+              <div className="card" style={{ padding: 10 }}>
+                <strong>Probabilidades estimadas vs Odds</strong>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 8 }}>
+                  {[
+                    { label: "Casa", prob: detailItem.homeProb, odd: detailItem.fixture.oddHome, impliedProb: implied?.home },
+                    { label: "Empate", prob: detailItem.drawProb, odd: detailItem.fixture.oddDraw, impliedProb: implied?.draw },
+                    { label: "Fora", prob: detailItem.awayProb, odd: detailItem.fixture.oddAway, impliedProb: implied?.away },
+                  ].map((col) => {
+                    const edge = col.impliedProb != null ? (col.prob - col.impliedProb) * 100 : null;
+                    const hasEdge = edge != null && edge > 0;
+                    return (
+                      <div key={col.label} style={{ textAlign: "center", padding: 8, borderRadius: 8, background: "rgba(255,255,255,.03)" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{col.label}</div>
+                        <div style={{ fontSize: 18, fontWeight: 700 }}>{(col.prob * 100).toFixed(1)}%</div>
+                        {col.odd ? (
+                          <>
+                            <div className="mini">Odd: {col.odd.toFixed(2)} ({col.impliedProb != null ? `${(col.impliedProb * 100).toFixed(1)}%` : "-"})</div>
+                            {edge != null && <div className={`mini ${hasEdge ? "good" : ""}`} style={{ fontWeight: hasEdge ? 700 : 400 }}>{hasEdge ? "+" : ""}{edge.toFixed(1)}pp</div>}
+                          </>
+                        ) : <div className="mini">Sem odd</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* === SEÇÃO 3: Comparativo direto === */}
+              {(() => {
+                const summary = buildDirectSummary(detailItem);
+                return (
+                  <div style={{ display: "grid", gap: 4 }}>
+                    <span className="mini"><strong>Comparativo direto:</strong> Ataque {detailItem.fixture.homeNick} vs {detailItem.fixture.awayNick}: {summary.attackGap >= 0 ? "+" : ""}{summary.attackGap.toFixed(2)} gol/j • Defesa: {summary.defenseGap >= 0 ? "+" : ""}{summary.defenseGap.toFixed(2)} • Tendência: {summary.trendScore >= 0 ? "favorável" : "cautela"} ({summary.trendScore.toFixed(1)})</span>
+                    <span className="mini"><strong>Cenário sugerido:</strong> {summary.bestScenario}</span>
+                    <span className="mini"><strong>Semáforo de risco:</strong> {risk.reason}</span>
+                  </div>
+                );
+              })()}
+
+              {/* === SEÇÃO 4: Placares mais prováveis === */}
+              <div className="card" style={{ padding: 10 }}>
+                <strong>Placares mais prováveis (Poisson)</strong>
+                <div className="mini" style={{ marginBottom: 6 }}>Baseado em xG: {detailItem.fixture.homeNick} {detailItem.expectedHomeGoals.toFixed(2)} vs {detailItem.fixture.awayNick} {detailItem.expectedAwayGoals.toFixed(2)}</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {detailItem.mostLikelyScores.map((sc, idx) => (
+                    <span key={`score-${idx}`} className={`badge ${idx === 0 ? "good" : ""}`}>
+                      {sc.home}-{sc.away} ({(sc.probability * 100).toFixed(1)}%)
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* === SEÇÃO 5: Mercados Over/Under/BTTS === */}
+              <div className="card" style={{ padding: 10 }}>
+                <strong>Mercados de gols</strong>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                  {detailItem.markets.map((market) => (
+                    <span key={market.market} className={`badge ${market.signal === "over" ? "good" : "warn"}`}>
+                      {market.market}: {(market.probability * 100).toFixed(1)}% • odd justa {market.fairOdd.toFixed(2)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* === SEÇÃO 5b: Stats individuais dos jogadores === */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {[
+                  { nick: detailItem.fixture.homeNick, stats: detailItem.homeIndividualStats },
+                  { nick: detailItem.fixture.awayNick, stats: detailItem.awayIndividualStats },
+                ].map((player) => (
+                  <div key={player.nick} className="card" style={{ padding: 10 }}>
+                    <strong>{player.nick} — Perfil individual</strong>
+                    <div style={{ display: "grid", gap: 4, marginTop: 6 }}>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <span className="badge">BTTS: {(player.stats.bttsRate * 100).toFixed(0)}%</span>
+                        <span className="badge">Marca: {(player.stats.scoringRate * 100).toFixed(0)}%</span>
+                        <span className="badge">Clean sheet: {(player.stats.cleanSheetRate * 100).toFixed(0)}%</span>
+                        <span className="badge">Média total: {player.stats.avgTotalGoals.toFixed(2)}</span>
+                      </div>
+                      <div className="mini" style={{ marginTop: 4 }}><strong>Over rates (últimos jogos):</strong></div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {player.stats.overRates.map((or) => (
+                          <span key={`${player.nick}-over-${or.line}`} className={`badge ${or.rate >= 0.6 ? "good" : or.rate >= 0.4 ? "warn" : "bad"}`}>
+                            O {or.line}: {(or.rate * 100).toFixed(0)}%
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* === SEÇÃO 5c: Diagnóstico de confiança === */}
+              <div className="card" style={{ padding: 10 }}>
+                <strong>Diagnóstico de confiança ({Math.round(detailItem.confidenceDiag.overall)}/100)</strong>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 8 }}>
+                  {[
+                    { label: "Amostra", value: detailItem.confidenceDiag.sampleScore, max: 40 },
+                    { label: "Forma", value: detailItem.confidenceDiag.formDiffScore, max: 25 },
+                    { label: "H2H", value: detailItem.confidenceDiag.h2hScore, max: 15 },
+                    { label: "Edge", value: detailItem.confidenceDiag.edgeScore, max: 20 },
+                  ].map((item) => (
+                    <div key={item.label} style={{ textAlign: "center", padding: 6, borderRadius: 8, background: "rgba(255,255,255,.03)" }}>
+                      <div className="mini" style={{ fontWeight: 700, marginBottom: 2 }}>{item.label}</div>
+                      <div style={{ fontSize: 16, fontWeight: 700 }}>{Math.round(item.value)}/{item.max}</div>
+                      <div style={{ background: "rgba(255,255,255,.08)", borderRadius: 4, height: 6, marginTop: 4, overflow: "hidden" }}>
+                        <div style={{ width: `${(item.value / item.max) * 100}%`, height: "100%", borderRadius: 4, background: item.value / item.max >= 0.7 ? "var(--badge-good-bg, #22c55e)" : item.value / item.max >= 0.4 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <ul style={{ margin: "8px 0 0 18px", padding: 0, display: "grid", gap: 3 }}>
+                  {detailItem.confidenceDiag.reasons.map((reason) => (
+                    <li key={reason} className="mini">{reason}</li>
                   ))}
                 </ul>
               </div>
 
-              <div className="row" style={{ alignItems: "flex-start", display: "grid", gap: 6 }}>
-                <span className="mini"><strong>? O que é força?</strong> Nota da qualidade do palpite.</span>
-                <span className="mini"><strong>? O que é vantagem?</strong> Quanto a sua previsão está melhor que a odd da casa.</span>
-                <span className="mini"><strong>? O que é recuperação?</strong> Sinal de reação após fase ruim (tendência de voltar a marcar).</span>
+              {/* === SEÇÃO 6: H2H direto === */}
+              <div className="card" style={{ padding: 10 }}>
+                <strong>Confronto direto (H2H)</strong>
+                {detailItem.h2hGames.length === 0 ? (
+                  <div className="mini" style={{ marginTop: 6 }}>Sem confrontos diretos na base de dados.</div>
+                ) : (
+                  <>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 8 }}>
+                      <span className="badge">{detailItem.sampleH2h} jogos</span>
+                      <span className="badge good">{detailItem.fixture.homeNick}: {detailItem.h2hHomeWins}V</span>
+                      <span className="badge warn">Empates: {detailItem.h2hDraws}</span>
+                      <span className="badge bad">{detailItem.fixture.awayNick}: {detailItem.h2hAwayWins}V</span>
+                      <span className="badge">Média gols H2H: {detailItem.h2hAvgGoals.toFixed(2)}</span>
+                      <span className="badge">BTTS no H2H: {(detailItem.h2hBttsRate * 100).toFixed(0)}%</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                      {detailItem.h2hOverRates.map((or) => (
+                        <span key={`h2h-over-${or.line}`} className={`badge ${or.rate >= 0.6 ? "good" : or.rate >= 0.4 ? "warn" : "bad"}`}>
+                          H2H O {or.line}: {(or.rate * 100).toFixed(0)}%
+                        </span>
+                      ))}
+                    </div>
+                    <div className="list">
+                      {detailItem.h2hGames.slice(0, 8).map((game, idx) => (
+                        <div key={`h2h-${idx}`} className="row" style={{ padding: "6px 10px" }}>
+                          <div style={{ display: "grid", gap: 2 }}>
+                            <span style={{ fontSize: 12, fontWeight: 600 }}>{game.homeNick} vs {game.awayNick}</span>
+                            <span className="mini">{new Date(game.dateTime).toLocaleString("pt-BR")}</span>
+                          </div>
+                          <div style={{ textAlign: "right", display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>{game.homeGoals}-{game.awayGoals}</span>
+                            <span className={`badge ${game.result === "V" ? "good" : game.result === "E" ? "warn" : "bad"}`}>{game.result === "V" ? `${detailItem.fixture.homeNick}` : game.result === "D" ? `${detailItem.fixture.awayNick}` : "Empate"}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
 
-              <div className="row" style={{ alignItems: "flex-start" }}>
-                <div style={{ flex: 1 }}>
-                  <strong>{detailItem.fixture.homeNick}</strong>
-                  <div className="mini">{detailItem.homeDeep.recent.wins}V/{detailItem.homeDeep.recent.draws}E/{detailItem.homeDeep.recent.losses}D • {detailItem.homeDeep.recent.points} pts • PPG {detailItem.homeDeep.recent.ppg.toFixed(2)}</div>
+              {/* === SEÇÃO 7: Sequências (Streaks) === */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div className="card" style={{ padding: 10 }}>
+                  <strong>{detailItem.fixture.homeNick} — Sequências</strong>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                    {detailItem.homeStreak.winStreak > 0 && <span className="badge good">{detailItem.homeStreak.winStreak}V seguidas</span>}
+                    {detailItem.homeStreak.lossStreak > 0 && <span className="badge bad">{detailItem.homeStreak.lossStreak}D seguidas</span>}
+                    {detailItem.homeStreak.unbeatenStreak > 1 && <span className="badge">{detailItem.homeStreak.unbeatenStreak} invicto</span>}
+                    {detailItem.homeStreak.scoringStreak > 1 && <span className="badge">{detailItem.homeStreak.scoringStreak} marcando</span>}
+                    {detailItem.homeStreak.cleanSheetStreak > 0 && <span className="badge">{detailItem.homeStreak.cleanSheetStreak} sem sofrer</span>}
+                    {detailItem.homeStreak.winStreak === 0 && detailItem.homeStreak.lossStreak === 0 && <span className="badge">Sem sequência forte</span>}
+                  </div>
+                  <div className="mini" style={{ marginTop: 6 }}>
+                    Forma: {detailItem.homeDeep.recent.wins}V/{detailItem.homeDeep.recent.draws}E/{detailItem.homeDeep.recent.losses}D • {detailItem.homeDeep.recent.points} pts • PPG {detailItem.homeDeep.recent.ppg.toFixed(2)}
+                  </div>
+                  <div className="mini">Gols: {detailItem.homeDeep.recent.avgGoalsFor.toFixed(2)} pró • {detailItem.homeDeep.recent.avgGoalsAgainst.toFixed(2)} contra</div>
                   <div className="mini">Recuperação: {Math.round(detailItem.homeDeep.recovery.score)}/100 • {detailItem.homeDeep.recovery.signal ? "sinal ativo" : "sem sinal"}</div>
                 </div>
-                <div style={{ flex: 1 }}>
-                  <strong>{detailItem.fixture.awayNick}</strong>
-                  <div className="mini">{detailItem.awayDeep.recent.wins}V/{detailItem.awayDeep.recent.draws}E/{detailItem.awayDeep.recent.losses}D • {detailItem.awayDeep.recent.points} pts • PPG {detailItem.awayDeep.recent.ppg.toFixed(2)}</div>
+                <div className="card" style={{ padding: 10 }}>
+                  <strong>{detailItem.fixture.awayNick} — Sequências</strong>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                    {detailItem.awayStreak.winStreak > 0 && <span className="badge good">{detailItem.awayStreak.winStreak}V seguidas</span>}
+                    {detailItem.awayStreak.lossStreak > 0 && <span className="badge bad">{detailItem.awayStreak.lossStreak}D seguidas</span>}
+                    {detailItem.awayStreak.unbeatenStreak > 1 && <span className="badge">{detailItem.awayStreak.unbeatenStreak} invicto</span>}
+                    {detailItem.awayStreak.scoringStreak > 1 && <span className="badge">{detailItem.awayStreak.scoringStreak} marcando</span>}
+                    {detailItem.awayStreak.cleanSheetStreak > 0 && <span className="badge">{detailItem.awayStreak.cleanSheetStreak} sem sofrer</span>}
+                    {detailItem.awayStreak.winStreak === 0 && detailItem.awayStreak.lossStreak === 0 && <span className="badge">Sem sequência forte</span>}
+                  </div>
+                  <div className="mini" style={{ marginTop: 6 }}>
+                    Forma: {detailItem.awayDeep.recent.wins}V/{detailItem.awayDeep.recent.draws}E/{detailItem.awayDeep.recent.losses}D • {detailItem.awayDeep.recent.points} pts • PPG {detailItem.awayDeep.recent.ppg.toFixed(2)}
+                  </div>
+                  <div className="mini">Gols: {detailItem.awayDeep.recent.avgGoalsFor.toFixed(2)} pró • {detailItem.awayDeep.recent.avgGoalsAgainst.toFixed(2)} contra</div>
                   <div className="mini">Recuperação: {Math.round(detailItem.awayDeep.recovery.score)}/100 • {detailItem.awayDeep.recovery.signal ? "sinal ativo" : "sem sinal"}</div>
                 </div>
               </div>
 
+              {/* === SEÇÃO 7b: Bounce-back (reação pós-derrota) === */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {[
+                  { nick: detailItem.fixture.homeNick, bb: detailItem.homeBounceBack },
+                  { nick: detailItem.fixture.awayNick, bb: detailItem.awayBounceBack },
+                ].map((player) => (
+                  <div key={`bb-${player.nick}`} className="card" style={{ padding: 10 }}>
+                    <strong>{player.nick} — Reação pós-derrota</strong>
+                    {player.bb.postLossGames === 0 ? (
+                      <div className="mini" style={{ marginTop: 6 }}>Sem derrotas na base para calcular reação.</div>
+                    ) : (
+                      <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <span className={`badge ${player.bb.bounceBackScore >= 65 ? "good" : player.bb.bounceBackScore >= 40 ? "warn" : "bad"}`}>
+                            Bounce-back: {Math.round(player.bb.bounceBackScore)}/100 ({player.bb.signal})
+                          </span>
+                          <span className="badge">
+                            Vence após derrota: {(player.bb.postLossWinRate * 100).toFixed(0)}% ({player.bb.postLossGames} jogos)
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <span className="badge">
+                            Gols pós-derrota: {player.bb.postLossAvgGf.toFixed(2)} pró / {player.bb.postLossAvgGa.toFixed(2)} contra
+                          </span>
+                          {player.bb.postCloseDefeatGames > 0 && (
+                            <span className={`badge ${player.bb.postCloseDefeatWinRate >= 0.5 ? "good" : "warn"}`}>
+                              Após derrota apertada (1 gol): {(player.bb.postCloseDefeatWinRate * 100).toFixed(0)}% V ({player.bb.postCloseDefeatGames}j)
+                            </span>
+                          )}
+                          {player.bb.postHeavyDefeatGames > 0 && (
+                            <span className={`badge ${player.bb.postHeavyDefeatWinRate >= 0.5 ? "good" : "bad"}`}>
+                              Após goleada (2+ gols): {(player.bb.postHeavyDefeatWinRate * 100).toFixed(0)}% V ({player.bb.postHeavyDefeatGames}j)
+                            </span>
+                          )}
+                        </div>
+                        <div className="mini">
+                          PPG nos 3 jogos após derrota: {player.bb.ppgAfterLoss3.toFixed(2)} vs PPG geral: {player.bb.ppgOverall.toFixed(2)} •
+                          Momentum: {player.bb.momentumShift >= 0 ? "+" : ""}{player.bb.momentumShift.toFixed(2)} PPG
+                          {player.bb.momentumShift > 0.1 ? " (melhora após perder)" : player.bb.momentumShift < -0.1 ? " (piora após perder)" : " (estável)"}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* === SEÇÃO 7c: Revenge factor (vingança no H2H) === */}
+              {detailItem.revengeFactor.h2hRevengeGames > 0 && (
+                <div className="card" style={{ padding: 10 }}>
+                  <strong>Fator vingança — {detailItem.fixture.homeNick} vs {detailItem.fixture.awayNick}</strong>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                    <span className={`badge ${detailItem.revengeFactor.h2hRevengeRate >= 0.6 ? "good" : detailItem.revengeFactor.h2hRevengeRate >= 0.4 ? "warn" : "bad"}`}>
+                      {detailItem.revengeFactor.signal}
+                    </span>
+                    <span className="badge">
+                      {detailItem.fixture.homeNick} vence após perder para {detailItem.fixture.awayNick}: {(detailItem.revengeFactor.h2hRevengeRate * 100).toFixed(0)}% ({detailItem.revengeFactor.h2hRevengeGames} situações)
+                    </span>
+                    <span className="badge">
+                      Média de gols na vingança: {detailItem.revengeFactor.h2hRevengeAvgGf.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* === SEÇÃO 8: Últimos 5 jogos de cada === */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 <div className="card" style={{ padding: 10 }}>
                   <strong>Últimos 5 jogos — {detailItem.fixture.homeNick}</strong>
                   <div className="list" style={{ marginTop: 8 }}>
                     {getLastFivePlayerGames(detailItem.fixture.homeNick).map((game) => (
-                      <div key={game.id} className="row" style={{ padding: "8px 10px" }}>
+                      <div key={game.id} className="row" style={{ padding: "6px 10px" }}>
                         <div style={{ display: "grid", gap: 2 }}>
                           <span style={{ fontSize: 12, fontWeight: 600 }}>{game.team} vs {game.opponent}</span>
                           <span className="mini">{new Date(game.dateTime).toLocaleString("pt-BR")}</span>
@@ -1423,7 +2058,7 @@ export default function AnaliseJogosPage() {
                   <strong>Últimos 5 jogos — {detailItem.fixture.awayNick}</strong>
                   <div className="list" style={{ marginTop: 8 }}>
                     {getLastFivePlayerGames(detailItem.fixture.awayNick).map((game) => (
-                      <div key={game.id} className="row" style={{ padding: "8px 10px" }}>
+                      <div key={game.id} className="row" style={{ padding: "6px 10px" }}>
                         <div style={{ display: "grid", gap: 2 }}>
                           <span style={{ fontSize: 12, fontWeight: 600 }}>{game.team} vs {game.opponent}</span>
                           <span className="mini">{new Date(game.dateTime).toLocaleString("pt-BR")}</span>
@@ -1438,9 +2073,20 @@ export default function AnaliseJogosPage() {
                 </div>
               </div>
 
+              {/* === SEÇÃO 9: Por que essa sugestão === */}
+              <div style={{ display: "grid", gap: 4 }}>
+                <strong>Por que essa sugestão?</strong>
+                <ul style={{ margin: "4px 0 0 18px", padding: 0, display: "grid", gap: 4 }}>
+                  {whyLines.map((line) => (
+                    <li key={line} className="mini">{line}</li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* === SEÇÃO 10: Leitura rápida completa === */}
               <div>
-                <strong>Leitura rápida (direta)</strong>
-                <ul style={{ margin: "8px 0 0 18px", padding: 0, display: "grid", gap: 6 }}>
+                <strong>Leitura rápida</strong>
+                <ul style={{ margin: "4px 0 0 18px", padding: 0, display: "grid", gap: 4 }}>
                   {buildCuriosities(detailItem).map((note) => (
                     <li key={note} className="mini">{note}</li>
                   ))}
