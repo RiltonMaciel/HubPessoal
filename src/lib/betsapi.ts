@@ -538,6 +538,8 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number,
   const seen = new Set<string>();
   const allMatches: BetsApiMatch[] = [];
   let processedPages = 0;
+  let emptyPages = 0;
+  let fetchErrors = 0;
   const errors: string[] = [];
 
   function addMatches(items: BetsApiMatch[]) {
@@ -580,28 +582,50 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number,
 
       for (const base of paginationBases) {
         const beforePaginate = allMatches.length;
+        let consecutiveEmpty = 0;
+        const MAX_CONSECUTIVE_EMPTY = 4;
 
-        // Start from page 2: page 1 is the root HTML we already parsed above.
-        for (let page = 2; page <= safeMaxPages; page += 1) {
+        // Se a base de resultados é diferente da root, buscar a página 1 dela também
+        const startPage = (base === normalizedCandidate) ? 2 : 1;
+
+        for (let page = startPage; page <= safeMaxPages; page += 1) {
+          // Delay anti-rate-limit: 300ms entre páginas (skip na 1ª)
+          if (page > startPage) {
+            await delay(300);
+          }
+
           const pageUrl = buildPageUrl(base, page);
           let html: string;
           try {
             html = await fetchBetsApiPage(pageUrl, options);
           } catch {
-            break;
+            // Erro de rede/403: conta como página vazia, não encerra
+            fetchErrors += 1;
+            consecutiveEmpty += 1;
+            if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY) break;
+            continue;
           }
           const pageMatches = parseRowsFromHtml(html);
           processedPages += 1;
 
-          if (pageMatches.length === 0) break;
+          // Página sem jogos parseáveis (estrutura HTML diferente, empty,
+          // ou challenge Cloudflare) — trata como stale, não para de imediato.
+          if (pageMatches.length === 0) {
+            emptyPages += 1;
+            consecutiveEmpty += 1;
+            if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY) break;
+            continue;
+          }
 
           const beforeCount = allMatches.length;
           addMatches(pageMatches);
 
-          // Detect stale pages (pagination returning same content)
+          // Detect stale pages (tudo duplicado)
           if (allMatches.length === beforeCount) {
-            // All matches already seen – pagination likely looping
-            break;
+            consecutiveEmpty += 1;
+            if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY) break;
+          } else {
+            consecutiveEmpty = 0;
           }
 
           if (reachedLimit()) break;
@@ -623,6 +647,8 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number,
   if (allMatches.length > 0) {
     return {
       processedPages,
+      emptyPages,
+      fetchErrors,
       matches: allMatches,
       lines: allMatches.map((item) => `${item.dateTime}\t-\t${item.fixture}\t${item.score}`),
     };
@@ -641,6 +667,8 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number,
     if (fallbackMatches.length > 0) {
       return {
         processedPages: Math.max(processedPages, boardFallback.processedPages),
+        emptyPages,
+        fetchErrors,
         matches: fallbackMatches,
         lines: fallbackMatches.map((item) => `${item.dateTime}\t-\t${item.fixture}\t${item.score}`),
       };
@@ -655,6 +683,8 @@ export async function collectBetsApiMatches(leagueUrl: string, maxPages: number,
 
   return {
     processedPages,
+    emptyPages,
+    fetchErrors,
     matches: [],
     lines: [],
   };

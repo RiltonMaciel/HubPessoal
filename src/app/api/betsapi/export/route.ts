@@ -59,6 +59,8 @@ export async function POST(request: Request) {
       ok: true,
       total: result.matches.length,
       pagesProcessed: result.processedPages,
+      emptyPages: result.emptyPages,
+      fetchErrors: result.fetchErrors,
       collectedInMs: Date.now() - startedAt,
       fileName: `betsapi-esoccer-${stamp}.txt`,
       text: result.lines.join("\n"),

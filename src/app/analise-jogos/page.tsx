@@ -10,6 +10,25 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Table } from "@/components/ui/Table";
+import {
+  weightedPlayerStats,
+  applyChangepoint,
+  shrinkGoals,
+  bayesianDrawPrior,
+  logLinearPool,
+  dixonColesGrid,
+  probsFromGrid,
+  computeDerivedSignals,
+  buildTrainingData,
+  trainWeights,
+  trainPlatt,
+  applyPlatt,
+  leagueDrawRate as calcLeagueDrawRate,
+  leagueAvgGoals,
+  type DerivedSignals,
+  type CalibratedWeights,
+  type PlattParams,
+} from "@/lib/prediction-engine";
 
 type ParsedFixture = {
   id: string;
@@ -97,6 +116,7 @@ type MatchInsight = {
   awayBounceBack: BounceBackProfile;
   revengeFactor: RevengeFactor;
   overProbs: { line: number; poisson: number; empirical: number; blended: number }[];
+  underProbs: { line: number; probability: number; fairOdd: number }[];
   consensusOver25: boolean;
   dangerZone: boolean;
 };
@@ -104,6 +124,7 @@ type MatchInsight = {
 type PlayerIndividualStats = {
   bttsRate: number;
   overRates: { line: number; rate: number }[];
+  underRates: { line: number; rate: number }[];
   avgTotalGoals: number;
   cleanSheetRate: number;
   scoringRate: number;
@@ -230,6 +251,7 @@ type BacktestRow = {
   expectedGoals: number;
   actualTotal: number;
   overHits: { line: number; predicted: boolean; actual: boolean; hit: boolean }[];
+  underHits: { line: number; predicted: boolean; actual: boolean; hit: boolean }[];
   bttsPredict: boolean;
   bttsActual: boolean;
   bttsHit: boolean;
@@ -241,6 +263,7 @@ type BacktestSummaryData = {
   pickRate: number;
   byConfidence: { level: string; total: number; hits: number; rate: number }[];
   overRates: { line: number; total: number; hits: number; rate: number }[];
+  underRates: { line: number; total: number; hits: number; rate: number }[];
   bttsTotal: number;
   bttsHits: number;
   bttsRate: number;
@@ -712,7 +735,7 @@ function playerWindow(matches: MatchRecord[], nick: string, limit = 25): PlayerW
   let bttsCount = 0;
   let cleanSheetCount = 0;
   let scoringCount = 0;
-  const overCounts = [0, 0, 0, 0, 0]; // 0.5, 1.5, 2.5, 3.5, 4.5
+  const overCounts = [0, 0, 0, 0, 0, 0, 0, 0, 0]; // 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5
 
   for (const row of rows) {
     const isHome = normalizeText(row.homeNick) === normalizedNick;
@@ -735,9 +758,13 @@ function playerWindow(matches: MatchRecord[], nick: string, limit = 25): PlayerW
     if (total > 2.5) overCounts[2] += 1;
     if (total > 3.5) overCounts[3] += 1;
     if (total > 4.5) overCounts[4] += 1;
+    if (total > 5.5) overCounts[5] += 1;
+    if (total > 6.5) overCounts[6] += 1;
+    if (total > 7.5) overCounts[7] += 1;
+    if (total > 8.5) overCounts[8] += 1;
   }
 
-  const lines = [0.5, 1.5, 2.5, 3.5, 4.5];
+  const lines = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5];
   const points = wins * 3 + draws;
   return {
     games: rows.length,
@@ -931,6 +958,27 @@ function summarizePlayerDeep(matches: MatchRecord[], nick: string, sampleWindow:
 function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mode: AnalysisMode, sampleWindow: SampleWindow): MatchInsight[] {
   const profile = profileByMode(mode);
 
+  // ═══ MOTOR V3: Treino global (uma vez por análise, não por jogo) ═══
+  const refDate = new Date();
+  const RECENCY_LAMBDA = 0.07;
+  const SHRINK_K = 6;
+  const PRIOR_GOALS = leagueAvgGoals(allMatches) / 2; // prior por lado
+  const LEAGUE_DRAW = calcLeagueDrawRate(allMatches);
+  const DIXON_RHO = -0.03;
+
+  // 1. Auto-calibração de pesos via regressão logística walk-forward
+  const trainingData = buildTrainingData(allMatches, refDate, RECENCY_LAMBDA);
+  const calibrated: CalibratedWeights = trainWeights(trainingData);
+
+  // 10. Platt scaling: treinar com as previsões do training data
+  const plattTrainData: { prob: number; actual: number }[] = [];
+  for (const tp of trainingData) {
+    const z = tp.features.reduce((s, f, i) => s + f * (calibrated.raw[i] ?? 0), 0) + calibrated.intercept;
+    const pred = 1 / (1 + Math.exp(-z * calibrated.beta));
+    plattTrainData.push({ prob: pred, actual: tp.outcome });
+  }
+  const plattParams: PlattParams = trainPlatt(plattTrainData);
+
   return fixtures.map((fixture) => {
     const home = playerWindow(allMatches, fixture.homeNick, sampleWindow);
     const away = playerWindow(allMatches, fixture.awayNick, sampleWindow);
@@ -993,7 +1041,7 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const h2hBttsRate = h2hRows.length ? h2hBttsCount / h2hRows.length : 0;
 
     // H2H over rates por linha
-    const h2hOverLines = [0.5, 1.5, 2.5, 3.5, 4.5];
+    const h2hOverLines = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5];
     const h2hOverRates = h2hOverLines.map((line) => {
       if (!h2hRows.length) return { line, rate: 0 };
       const count = h2hGamesList.filter((g) => g.homeGoals + g.awayGoals > line).length;
@@ -1004,6 +1052,7 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const homeIndividualStats: PlayerIndividualStats = {
       bttsRate: home.bttsRate,
       overRates: home.overRates,
+      underRates: home.overRates.filter((r) => r.line >= 2.5).map((r) => ({ line: r.line, rate: 1 - r.rate })),
       avgTotalGoals: home.avgTotal,
       cleanSheetRate: home.cleanSheetRate,
       scoringRate: home.scoringRate,
@@ -1011,6 +1060,7 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const awayIndividualStats: PlayerIndividualStats = {
       bttsRate: away.bttsRate,
       overRates: away.overRates,
+      underRates: away.overRates.filter((r) => r.line >= 2.5).map((r) => ({ line: r.line, rate: 1 - r.rate })),
       avgTotalGoals: away.avgTotal,
       cleanSheetRate: away.cleanSheetRate,
       scoringRate: away.scoringRate,
@@ -1022,13 +1072,26 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const awayBounceBack = computeBounceBack(allMatches, fixture.awayNick);
     const revengeFactor = computeRevengeFactor(allMatches, fixture.homeNick, fixture.awayNick);
 
-    // === MOTOR DE PREVISÃO v2 — Poisson + Sigmoid + Odds + Comportamental ===
+    // === MOTOR DE PREVISÃO v3 — 10 melhorias cirúrgicas ===
 
-    // 1. Expected goals (lambdas) — modelo composto
-    let lambdaHome = home.gf * 0.55 + away.ga * 0.45;
-    let lambdaAway = away.gf * 0.55 + home.ga * 0.45;
+    // 7. Stats ponderados por recência
+    const homeWS = weightedPlayerStats(allMatches, fixture.homeNick, refDate, RECENCY_LAMBDA);
+    const awayWS = weightedPlayerStats(allMatches, fixture.awayNick, refDate, RECENCY_LAMBDA);
 
-    // Ajuste por forma recente
+    // 9. Changepoint detection
+    const homeCp = applyChangepoint(allMatches, fixture.homeNick);
+    const awayCp = applyChangepoint(allMatches, fixture.awayNick);
+
+    // 4. Bayesian shrinkage nos expected goals
+    const shrunkHomeGf = shrinkGoals(homeWS.wGf, homeWS.games, PRIOR_GOALS, SHRINK_K);
+    const shrunkHomeGa = shrinkGoals(homeWS.wGa, homeWS.games, PRIOR_GOALS, SHRINK_K);
+    const shrunkAwayGf = shrinkGoals(awayWS.wGf, awayWS.games, PRIOR_GOALS, SHRINK_K);
+    const shrunkAwayGa = shrinkGoals(awayWS.wGa, awayWS.games, PRIOR_GOALS, SHRINK_K);
+
+    let lambdaHome = (shrunkHomeGf * 0.55 + shrunkAwayGa * 0.45);
+    let lambdaAway = (shrunkAwayGf * 0.55 + shrunkHomeGa * 0.45);
+
+    // Ajuste por forma recente (ponderada)
     lambdaHome = lambdaHome * 0.70 + homeDeep.recent.avgGoalsFor * 0.30;
     lambdaAway = lambdaAway * 0.70 + awayDeep.recent.avgGoalsFor * 0.30;
 
@@ -1046,40 +1109,41 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     const expectedGoals = expectedHomeGoals + expectedAwayGoals;
     const mostLikelyScores = computeMostLikelyScores(expectedHomeGoals, expectedAwayGoals);
 
-    // 2. Poisson 1X2
-    let poissonHome = 0;
-    let poissonDraw = 0;
-    let poissonAway = 0;
-    for (let h = 0; h <= 8; h += 1) {
-      for (let a = 0; a <= 8; a += 1) {
-        const p = poissonPmf(expectedHomeGoals, h) * poissonPmf(expectedAwayGoals, a);
-        if (h > a) poissonHome += p;
-        else if (h === a) poissonDraw += p;
-        else poissonAway += p;
-      }
-    }
+    // 6. Dixon-Coles: grid de probabilidades com covariância
+    const dcGrid = dixonColesGrid(expectedHomeGoals, expectedAwayGoals, DIXON_RHO);
+    const dcProbs = probsFromGrid(dcGrid);
+    const poissonHome = dcProbs.homeWin;
+    const poissonDraw = dcProbs.draw;
+    const poissonAway = dcProbs.awayWin;
 
-    // 3. Modelo estatístico (sigmoid)
+    // 8. Sinais derivados
+    const derivedSigs: DerivedSignals = computeDerivedSignals(
+      homeWS.recentForm, awayWS.recentForm,
+      homeWS.wGf, awayWS.wGf, homeWS.wGa, awayWS.wGa,
+      revengeFactor.signal,
+    );
+
+    // 1+2. Score com pesos calibrados + β auto-calculado
     const formDiff = (home.ppg - away.ppg) / 3;
     const winDiff = home.winRate - away.winRate;
     const attackDiff = (home.gf - away.gf) / 4;
     const defenseDiff = (away.ga - home.ga) / 4;
     const h2hDiff = h2hRows.length ? (homeH2hPoints - awayH2hPoints) / Math.max(1, h2hRows.length * 3) : 0;
 
-    const score =
-      formDiff * 0.30 +
-      winDiff * 0.20 +
-      attackDiff * 0.15 +
-      defenseDiff * 0.15 +
-      h2hDiff * 0.20;
+    const feats = [formDiff, winDiff, attackDiff, defenseDiff, h2hDiff,
+      derivedSigs.tiltDiff, derivedSigs.revengeFactor, derivedSigs.styleMismatch, derivedSigs.sessionDrift];
+    const score = feats.reduce((s, f, i) => s + f * (calibrated.normalized[i] ?? 0.1), 0)
+      + calibrated.intercept + derivedSigs.totalAdj;
 
-    const drawWeight = clamp(0.2 + (1 - Math.min(1, Math.abs(score) * 1.7)) * 0.12, 0.12, 0.34);
+    // 3. Draw prior bayesiano
+    const h2hDrawRateLocal = h2hRows.length ? h2hDraws / h2hRows.length : 0;
+    const drawWeight = bayesianDrawPrior(h2hDrawRateLocal, h2hRows.length, LEAGUE_DRAW);
     const winBudget = 1 - drawWeight;
-    const sigmoidHome = winBudget * sigmoid(score * 2.4);
+    const sigmoidHome = winBudget * sigmoid(score * calibrated.beta);
     const sigmoidAway = winBudget - sigmoidHome;
     const sigmoidDraw = drawWeight;
 
-    // 4. Ajustes comportamentais
+    // 4b. Ajustes comportamentais (streaks + bounce-back)
     let homeAdj = 0;
     let awayAdj = 0;
     if (homeStreak.winStreak >= 3) homeAdj += 0.015 * Math.min(homeStreak.winStreak, 5);
@@ -1088,26 +1152,38 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     if (awayStreak.lossStreak >= 2) awayAdj -= 0.01 * Math.min(awayStreak.lossStreak, 4);
     if (homeStreak.lossStreak > 0 && homeBounceBack.bounceBackScore >= 55) homeAdj += 0.025 * (homeBounceBack.bounceBackScore / 100);
     if (awayStreak.lossStreak > 0 && awayBounceBack.bounceBackScore >= 55) awayAdj += 0.025 * (awayBounceBack.bounceBackScore / 100);
-    if (revengeFactor.signal === "vingança forte") homeAdj += 0.025;
-    else if (revengeFactor.signal === "vingança moderada") homeAdj += 0.01;
 
-    // 5. Blend final: Poisson (35%) + Sigmoid (25%) + Odds (40%) | sem odds: 50/50
+    // 5. Blend: Poisson DC + Sigmoid calibrado + Odds via log-linear pooling
     const implied = impliedFromOdds(fixture.oddHome, fixture.oddDraw, fixture.oddAway);
     let homeProb: number;
     let drawProb: number;
     let awayProb: number;
+    const modelHome = poissonHome * 0.50 + sigmoidHome * 0.50;
+    const modelDraw = poissonDraw * 0.50 + sigmoidDraw * 0.50;
+    const modelAway = poissonAway * 0.50 + sigmoidAway * 0.50;
     if (implied) {
-      homeProb = poissonHome * 0.30 + sigmoidHome * 0.25 + implied.home * 0.45;
-      drawProb = poissonDraw * 0.30 + sigmoidDraw * 0.25 + implied.draw * 0.45;
-      awayProb = poissonAway * 0.30 + sigmoidAway * 0.25 + implied.away * 0.45;
+      const pooled = logLinearPool(
+        [modelHome, modelDraw, modelAway],
+        [implied.home, implied.draw, implied.away],
+        calibrated.source === "optimized" ? 0.62 : 0.55,
+      );
+      homeProb = pooled[0];
+      drawProb = pooled[1];
+      awayProb = pooled[2];
     } else {
-      homeProb = poissonHome * 0.50 + sigmoidHome * 0.50;
-      drawProb = poissonDraw * 0.50 + sigmoidDraw * 0.50;
-      awayProb = poissonAway * 0.50 + sigmoidAway * 0.50;
+      homeProb = modelHome;
+      drawProb = modelDraw;
+      awayProb = modelAway;
     }
     homeProb += homeAdj;
     awayProb += awayAdj;
     drawProb -= (homeAdj + awayAdj) * 0.3;
+
+    // 10. Platt scaling
+    homeProb = applyPlatt(Math.max(homeProb, 0.02), plattParams);
+    awayProb = applyPlatt(Math.max(awayProb, 0.02), plattParams);
+    drawProb = Math.max(drawProb, 0.02);
+
     const rawNorm = homeProb + drawProb + awayProb || 1;
     homeProb = Math.max(0.02, homeProb / rawNorm);
     drawProb = Math.max(0.02, drawProb / rawNorm);
@@ -1118,7 +1194,7 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
     awayProb /= norm2;
 
     // 6. Over probabilities com blend empírico (Poisson + dados reais + H2H)
-    const overLines = [1.5, 2.5, 3.5, 4.5];
+    const overLines = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5];
     const overProbs = overLines.map((line) => {
       const poissonOver = 1 - poissonCdf(expectedGoals, line);
       const homeOR = home.overRates.find((r) => r.line === line)?.rate ?? poissonOver;
@@ -1132,6 +1208,14 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
         blended = poissonOver * 0.45 + empirical * 0.55;
       }
       return { line, poisson: poissonOver, empirical, blended: clamp(blended, 0, 1) };
+    });
+
+    // Under probabilities (complemento do Over) — linhas 2.5 a 8.5
+    const underLines = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5];
+    const underProbs = underLines.map((line) => {
+      const overP = overProbs.find((op) => op.line === line)?.blended ?? (1 - poissonCdf(expectedGoals, line));
+      const underP = clamp(1 - overP, 0, 1);
+      return { line, probability: underP, fairOdd: 1 / Math.max(0.01, underP) };
     });
 
     // BTTS com blend empírico
@@ -1157,6 +1241,15 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
       fairOdd: 1 / Math.max(0.01, op.blended),
       signal: (op.blended >= 0.5 ? "over" : "under") as "over" | "under",
     }));
+    // Under markets
+    for (const up of underProbs) {
+      markets.push({
+        market: `Under ${up.line}`,
+        probability: up.probability,
+        fairOdd: up.fairOdd,
+        signal: (up.probability >= 0.5 ? "under" : "over") as "over" | "under",
+      });
+    }
     markets.push({
       market: "BTTS (Sim)",
       probability: clamp(bttsProb, 0, 1),
@@ -1227,10 +1320,14 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
       `${fixture.homeNick} recuperação: ${Math.round(homeDeep.recovery.score)} (${homeDeep.recovery.reason})`,
       `${fixture.awayNick} recuperação: ${Math.round(awayDeep.recovery.score)} (${awayDeep.recovery.reason})`,
       overAlertReason,
-      `Média esperada de gols: ${expectedGoals.toFixed(2)} (Poisson+Empírico).`,
+      `Média esperada de gols: ${expectedGoals.toFixed(2)} (Poisson DC + Empírico).`,
+      `Motor v3: pesos ${calibrated.source}, β=${calibrated.beta.toFixed(2)}, Platt=${plattParams.trained ? "ativo" : "off"}.`,
+      homeCp.detected ? `Changepoint ${fixture.homeNick}: regime mudou de ${homeCp.oldMean.toFixed(1)} para ${homeCp.newMean.toFixed(1)} gols/j.` : null,
+      awayCp.detected ? `Changepoint ${fixture.awayNick}: regime mudou de ${awayCp.oldMean.toFixed(1)} para ${awayCp.newMean.toFixed(1)} gols/j.` : null,
+      `Sinais derivados: tilt=${derivedSigs.tiltDiff.toFixed(2)}, mismatch=${derivedSigs.styleMismatch.toFixed(2)}, drift=${derivedSigs.sessionDrift.toFixed(2)}.`,
       consensusOver25 ? `Consenso Over 2.5: Poisson, empírico e H2H convergem à favor.` : `Sem consenso Over 2.5 entre os modelos.`,
       dangerZone ? `DANGER ZONE: jogo muito equilibrado, cautela máxima.` : `Jogo com diferenciação nítida entre os lados.`,
-    ];
+    ].filter(Boolean) as string[];
 
     return {
       fixture,
@@ -1276,6 +1373,7 @@ function buildInsights(fixtures: ParsedFixture[], allMatches: MatchRecord[], mod
       awayBounceBack,
       revengeFactor,
       overProbs,
+      underProbs,
       consensusOver25,
       dangerZone,
     };
@@ -1567,7 +1665,7 @@ export default function AnaliseJogosPage() {
       `Palpite: ${item.pick} | Força: ${Math.round(item.confidenceScore)} | ${risk.label}`,
       `Prob.: Casa ${(item.homeProb * 100).toFixed(1)}% | Empate ${(item.drawProb * 100).toFixed(1)}% | Fora ${(item.awayProb * 100).toFixed(1)}%`,
       item.valueEdgePp == null ? "Vantagem: sem odd informada" : `Vantagem: ${item.valueEdgePp.toFixed(1)}pp`,
-      `Over 2.5: ${((o25?.blended ?? 0) * 100).toFixed(0)}% | BTTS: ${(item.bttsProb * 100).toFixed(0)}% | xG: ${item.expectedGoals.toFixed(2)}`,
+      `Over 2.5: ${((o25?.blended ?? 0) * 100).toFixed(0)}% | Under 4.5: ${((item.underProbs.find((u) => u.line === 4.5)?.probability ?? 0) * 100).toFixed(0)}% | BTTS: ${(item.bttsProb * 100).toFixed(0)}% | xG: ${item.expectedGoals.toFixed(2)}`,
       `Cenário: ${buildDirectSummary(item).bestScenario}${item.consensusOver25 ? " | CONSENSO O2.5" : ""}${item.dangerZone ? " | DANGER ZONE" : ""}`,
     ].join("\n");
   }
@@ -1631,11 +1729,19 @@ export default function AnaliseJogosPage() {
           testMatch.homeGoals > testMatch.awayGoals ? "Casa"
           : testMatch.homeGoals < testMatch.awayGoals ? "Fora" : "Empate";
 
-        const overLines = [1.5, 2.5, 3.5, 4.5];
+        const overLines = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5];
         const overHits = overLines.map((line) => {
           const op = insight.overProbs.find((r) => r.line === line);
           const predicted = (op?.blended ?? 0) >= 0.50;
           const actual = actualTotal > line;
+          return { line, predicted, actual, hit: predicted === actual };
+        });
+
+        const underLinesB = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5];
+        const underHits = underLinesB.map((line) => {
+          const up = insight.underProbs.find((r) => r.line === line);
+          const predicted = (up?.probability ?? 0) >= 0.50;
+          const actual = actualTotal <= line;
           return { line, predicted, actual, hit: predicted === actual };
         });
 
@@ -1660,6 +1766,7 @@ export default function AnaliseJogosPage() {
           expectedGoals: insight.expectedGoals,
           actualTotal,
           overHits,
+          underHits,
           bttsPredict,
           bttsActual,
           bttsHit: bttsPredict === bttsActual,
@@ -1674,8 +1781,13 @@ export default function AnaliseJogosPage() {
         return { level, total: sub.length, hits, rate: sub.length ? hits / sub.length : 0 };
       });
 
-      const overRates = [1.5, 2.5, 3.5, 4.5].map((line) => {
+      const overRates = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5].map((line) => {
         const hits = rows.filter((r) => r.overHits.find((o) => o.line === line)?.hit).length;
+        return { line, total: rows.length, hits, rate: rows.length ? hits / rows.length : 0 };
+      });
+
+      const underRates = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5].map((line) => {
+        const hits = rows.filter((r) => r.underHits.find((u) => u.line === line)?.hit).length;
         return { line, total: rows.length, hits, rate: rows.length ? hits / rows.length : 0 };
       });
 
@@ -1687,6 +1799,7 @@ export default function AnaliseJogosPage() {
         pickRate: rows.length ? pickHits / rows.length : 0,
         byConfidence,
         overRates,
+        underRates,
         bttsTotal: rows.length,
         bttsHits,
         bttsRate: rows.length ? bttsHits / rows.length : 0,
@@ -1832,6 +1945,9 @@ export default function AnaliseJogosPage() {
                   <th className="right">O 2.5</th>
                   <th className="right">O 3.5</th>
                   <th className="right">O 4.5</th>
+                  <th className="right">U 2.5</th>
+                  <th className="right">U 4.5</th>
+                  <th className="right">U 6.5</th>
                   <th className="right">BTTS</th>
                   <th>Ações</th>
                 </tr>
@@ -1842,6 +1958,9 @@ export default function AnaliseJogosPage() {
                   const o25 = item.overProbs.find((r) => r.line === 2.5);
                   const o35 = item.overProbs.find((r) => r.line === 3.5);
                   const o45 = item.overProbs.find((r) => r.line === 4.5);
+                  const u25 = item.underProbs.find((r) => r.line === 2.5);
+                  const u45 = item.underProbs.find((r) => r.line === 4.5);
+                  const u65 = item.underProbs.find((r) => r.line === 6.5);
                   return (
                   <tr key={item.fixture.id} style={item.dangerZone ? { opacity: 0.7 } : undefined}>
                     <td>
@@ -1880,6 +1999,9 @@ export default function AnaliseJogosPage() {
                     <td className="right"><span className={`badge ${(o25?.blended ?? 0) >= 0.55 ? "good" : (o25?.blended ?? 0) >= 0.40 ? "warn" : "bad"}`}>{((o25?.blended ?? 0) * 100).toFixed(0)}%</span></td>
                     <td className="right"><span className={`badge ${(o35?.blended ?? 0) >= 0.50 ? "good" : (o35?.blended ?? 0) >= 0.35 ? "warn" : "bad"}`}>{((o35?.blended ?? 0) * 100).toFixed(0)}%</span></td>
                     <td className="right"><span className={`badge ${(o45?.blended ?? 0) >= 0.40 ? "good" : (o45?.blended ?? 0) >= 0.25 ? "warn" : "bad"}`}>{((o45?.blended ?? 0) * 100).toFixed(0)}%</span></td>
+                    <td className="right"><span className={`badge ${(u25?.probability ?? 0) >= 0.55 ? "good" : (u25?.probability ?? 0) >= 0.40 ? "warn" : "bad"}`}>{((u25?.probability ?? 0) * 100).toFixed(0)}%</span></td>
+                    <td className="right"><span className={`badge ${(u45?.probability ?? 0) >= 0.55 ? "good" : (u45?.probability ?? 0) >= 0.40 ? "warn" : "bad"}`}>{((u45?.probability ?? 0) * 100).toFixed(0)}%</span></td>
+                    <td className="right"><span className={`badge ${(u65?.probability ?? 0) >= 0.55 ? "good" : (u65?.probability ?? 0) >= 0.40 ? "warn" : "bad"}`}>{((u65?.probability ?? 0) * 100).toFixed(0)}%</span></td>
                     <td className="right"><span className={`badge ${item.bttsProb >= 0.55 ? "good" : item.bttsProb >= 0.40 ? "warn" : "bad"}`}>{(item.bttsProb * 100).toFixed(0)}%</span></td>
                     <td>
                       <Button onClick={() => setDetailItem(item)}>Detalhes</Button>
@@ -1906,6 +2028,7 @@ export default function AnaliseJogosPage() {
               {filteredInsights.map((item) => {
                 const risk = buildRiskSignal(item);
                 const bestOver = item.overProbs.filter((o) => o.blended >= 0.50).sort((a, b) => b.blended - a.blended)[0];
+                const bestUnder = item.underProbs.filter((u) => u.probability >= 0.50).sort((a, b) => b.probability - a.probability)[0];
                 return (
                   <div key={`signal-${item.fixture.id}`} className="card" style={{ padding: 12, cursor: "pointer" }} onClick={() => setDetailItem(item)}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -1922,6 +2045,9 @@ export default function AnaliseJogosPage() {
                       </span>
                       {bestOver && (
                         <span className="badge good">O {bestOver.line} {(bestOver.blended * 100).toFixed(0)}%</span>
+                      )}
+                      {bestUnder && (
+                        <span className="badge warn">U {bestUnder.line} {(bestUnder.probability * 100).toFixed(0)}%</span>
                       )}
                       {item.consensusOver25 && <span className="badge good" style={{ fontSize: 10 }}>CONSENSO</span>}
                       {item.dangerZone && <span className="badge bad" style={{ fontSize: 10 }}>PERIGO</span>}
@@ -1946,7 +2072,7 @@ export default function AnaliseJogosPage() {
           <CardHeader>
             <div>
               <h3>Sugestões de mercado</h3>
-              <small>Over 1.5 a 4.5 e BTTS com probabilidade blendada (Poisson + empírico + H2H) e odd justa.</small>
+              <small>Over 1.5 a 8.5, Under 2.5 a 8.5 e BTTS com probabilidade blendada (Poisson + empírico + H2H) e odd justa.</small>
             </div>
           </CardHeader>
           <CardBody>
@@ -2199,6 +2325,14 @@ export default function AnaliseJogosPage() {
                         {player.stats.overRates.map((or) => (
                           <span key={`${player.nick}-over-${or.line}`} className={`badge ${or.rate >= 0.6 ? "good" : or.rate >= 0.4 ? "warn" : "bad"}`}>
                             O {or.line}: {(or.rate * 100).toFixed(0)}%
+                          </span>
+                        ))}
+                      </div>
+                      <div className="mini" style={{ marginTop: 4 }}><strong>Under rates (últimos jogos):</strong></div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {player.stats.underRates.map((ur) => (
+                          <span key={`${player.nick}-under-${ur.line}`} className={`badge ${ur.rate >= 0.6 ? "good" : ur.rate >= 0.4 ? "warn" : "bad"}`}>
+                            U {ur.line}: {(ur.rate * 100).toFixed(0)}%
                           </span>
                         ))}
                       </div>
@@ -2514,7 +2648,7 @@ export default function AnaliseJogosPage() {
               {/* Acerto por linha de over */}
               <div className="card" style={{ padding: 12 }}>
                 <strong>Acerto de Over por linha</strong>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 10 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10, marginTop: 10 }}>
                   {backtestData.overRates.map((o) => (
                     <div key={o.line} style={{ textAlign: "center", padding: 10, borderRadius: 8, background: "rgba(255,255,255,.03)" }}>
                       <div className="mini" style={{ fontWeight: 700 }}>Over {o.line}</div>
@@ -2524,6 +2658,25 @@ export default function AnaliseJogosPage() {
                       <div className="mini">{o.hits}/{o.total}</div>
                       <div style={{ background: "rgba(255,255,255,.08)", borderRadius: 4, height: 6, marginTop: 6, overflow: "hidden" }}>
                         <div style={{ width: `${o.rate * 100}%`, height: "100%", borderRadius: 4, background: o.rate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : o.rate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Acerto por linha de under */}
+              <div className="card" style={{ padding: 12 }}>
+                <strong>Acerto de Under por linha</strong>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10, marginTop: 10 }}>
+                  {backtestData.underRates.map((u) => (
+                    <div key={`under-${u.line}`} style={{ textAlign: "center", padding: 10, borderRadius: 8, background: "rgba(255,255,255,.03)" }}>
+                      <div className="mini" style={{ fontWeight: 700 }}>Under {u.line}</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: u.rate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : u.rate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }}>
+                        {(u.rate * 100).toFixed(1)}%
+                      </div>
+                      <div className="mini">{u.hits}/{u.total}</div>
+                      <div style={{ background: "rgba(255,255,255,.08)", borderRadius: 4, height: 6, marginTop: 6, overflow: "hidden" }}>
+                        <div style={{ width: `${u.rate * 100}%`, height: "100%", borderRadius: 4, background: u.rate >= 0.60 ? "var(--badge-good-bg, #22c55e)" : u.rate >= 0.40 ? "var(--badge-warn-bg, #facc15)" : "var(--badge-bad-bg, #ef4444)" }} />
                       </div>
                     </div>
                   ))}
@@ -2548,6 +2701,9 @@ export default function AnaliseJogosPage() {
                         <th>O 2.5</th>
                         <th>O 3.5</th>
                         <th>O 4.5</th>
+                        <th>U 2.5</th>
+                        <th>U 4.5</th>
+                        <th>U 6.5</th>
                         <th>BTTS</th>
                       </tr>
                     </thead>
@@ -2563,8 +2719,11 @@ export default function AnaliseJogosPage() {
                           <td><span className="badge">{r.actualResult}</span></td>
                           <td><span className={`badge ${r.pickHit ? "good" : "bad"}`}>{r.pickHit ? "OK" : "MISS"}</span></td>
                           <td><span className={`badge ${r.confidence === "alta" ? "good" : r.confidence === "media" ? "warn" : "bad"}`}>{r.confidence}</span></td>
-                          {r.overHits.map((o) => (
-                            <td key={o.line}><span className={`badge ${o.hit ? "good" : "bad"}`}>{o.hit ? "OK" : "X"}</span></td>
+                          {r.overHits.filter((o) => [1.5, 2.5, 3.5, 4.5].includes(o.line)).map((o) => (
+                            <td key={`o-${o.line}`}><span className={`badge ${o.hit ? "good" : "bad"}`}>{o.hit ? "OK" : "X"}</span></td>
+                          ))}
+                          {r.underHits.filter((u) => [2.5, 4.5, 6.5].includes(u.line)).map((u) => (
+                            <td key={`u-${u.line}`}><span className={`badge ${u.hit ? "good" : "bad"}`}>{u.hit ? "OK" : "X"}</span></td>
                           ))}
                           <td><span className={`badge ${r.bttsHit ? "good" : "bad"}`}>{r.bttsHit ? "OK" : "X"}</span></td>
                         </tr>
