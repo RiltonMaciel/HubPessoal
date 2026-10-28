@@ -42,3 +42,10 @@ jobs:
           name: MeuMercado-saldos-teste-paralelo
           path: apps/meu-mercado/app/build/outputs/apk/saldoteste/app-saldoteste.apk
           if-no-files-found: error
+      - name: Compilar APK com correção de salvar saldos sem apagar o antigo
+        run: gradle -p apps/meu-mercado :app:assembleSaldocorrigido --stacktrace --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeuMercado-saldos-fix-v1.0.2
+          path: apps/meu-mercado/app/build/outputs/apk/saldocorrigido/app-saldocorrigido.apk
+          if-no-files-found: error

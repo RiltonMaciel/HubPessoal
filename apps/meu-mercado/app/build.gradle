@@ -7,14 +7,21 @@ android {
         applicationId 'com.meumercado.app'
         minSdk 24
         targetSdk 34
-        versionCode 2
-        versionName '1.0.1-alpha'
+        versionCode 3
+        versionName '1.0.2-alpha'
+        manifestPlaceholders = [appLabel: 'Meu Mercado']
     }
     buildTypes {
         saldoteste {
             initWith debug
             applicationIdSuffix '.saldoteste'
             versionNameSuffix '-paralelo'
+        }
+        saldocorrigido {
+            initWith debug
+            applicationIdSuffix '.saldocorrigido'
+            versionNameSuffix '-testesaldos'
+            manifestPlaceholders = [appLabel: 'Meu Mercado Saldos FIX']
         }
     }
     compileOptions {
