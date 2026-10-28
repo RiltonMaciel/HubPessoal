@@ -20,6 +20,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.text.InputType;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -76,8 +78,8 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(BG);getWindow().setNavigationBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(0);
         pref=getSharedPreferences("meu_mercado",MODE_PRIVATE);db=new Store(this);
-        balances.put("Vale-alimentação",25000L);balances.put("Vale-refeição",10000L);
-        balances.put("Pix / Conta",15000L);balances.put("Dinheiro",5000L);balances.put("Cartão de crédito",0L);
+        balances.put("Vale-alimentação",0L);balances.put("Vale-refeição",0L);
+        balances.put("Pix / Conta",0L);balances.put("Dinheiro",0L);balances.put("Cartão de crédito",0L);
         load();showHome();
         if(!pref.getBoolean("welcome",false)){
             pref.edit().putBoolean("welcome",true).apply();
@@ -91,7 +93,7 @@ public class MainActivity extends Activity {
     private void load(){
         try{draft=new JSONArray(pref.getString("draft","[]"));}catch(Exception e){draft=new JSONArray();}
         budget=pref.getLong("budget",30000);createdAt=pref.getLong("created",System.currentTimeMillis());
-        if(pref.contains("balances")){try{JSONObject o=new JSONObject(pref.getString("balances","{}"));for(String k:balances.keySet())if(o.has(k))balances.put(k,o.optLong(k));}catch(Exception ignored){}}
+        if(pref.contains("balances")){try{JSONObject o=new JSONObject(pref.getString("balances","{}"));for(String k:balances.keySet())if(o.has(k))balances.put(k,Math.max(0,o.optLong(k)));java.util.Iterator<String> keys=o.keys();while(keys.hasNext()){String k=keys.next();if(!balances.containsKey(k))balances.put(k,Math.max(0,o.optLong(k)));}}catch(Exception ignored){}}
         market=pref.getString("market","");address=pref.getString("address","");
         if(pref.contains("lat")){latitude=Double.longBitsToDouble(pref.getLong("lat",0));longitude=Double.longBitsToDouble(pref.getLong("lng",0));}
     }
@@ -119,7 +121,7 @@ public class MainActivity extends Activity {
     private EditText input(String hint,String value,int type){EditText e=new EditText(this);e.setSingleLine(true);e.setTextColor(WHITE);e.setHintTextColor(MUTED);e.setTextSize(16);e.setHint(hint);e.setText(value);e.setInputType(type);e.setSelectAllOnFocus(true);e.setBackground(bg(PANEL2,12));pad(e,14,10,14,10);return e;}
     private void label(LinearLayout p,String name){margin(p,text(name,13,MUTED,false),0,12,0,6);}
     private void field(LinearLayout p,String name,EditText e){label(p,name);p.addView(e,lp(-1,47));}
-    private long price(String value){try{String cleaned=value.replace("R$","").replace(" ","").trim();if(cleaned.contains(","))cleaned=cleaned.replace(".","").replace(",",".");return Math.round(Double.parseDouble(cleaned)*100);}catch(Exception e){return -1;}}
+    private long price(String value){return BalanceMath.parseMoney(value);}
     private double amount(String value){try{return Double.parseDouble(value.trim().replace(",","."));}catch(Exception e){return -1;}}
     private long itemTotal(JSONObject i){return Math.round(i.optLong("price")*i.optDouble("qty",1));}
     private long total(){long v=0;for(int n=0;n<draft.length();n++)v+=itemTotal(draft.optJSONObject(n));return v;}
@@ -141,9 +143,10 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(71),1);p.setMargins(dp(3),0,dp(3),0);metrics.addView(c,p);}
         root.addView(metrics,lp(-1,-2));
         LinearLayout progress=col();pad(progress,20,13,20,0);LinearLayout track=row();track.setBackground(bg(PANEL2,5));
-        long pct=budget>0?Math.min(100,Math.max(0,spent*100/budget)):100;
+        long pct=budget>0?Math.min(100,Math.max(0,spent*100/budget)):(spent>0?100:0);
         View fill=new View(this);fill.setBackground(bg(spent>budget?RED:GREEN,5));track.addView(fill,new LinearLayout.LayoutParams(0,dp(8),pct));track.addView(new View(this),new LinearLayout.LayoutParams(0,dp(8),100-pct));
-        progress.addView(track,lp(-1,8));progress.addView(text(pct+"% do orçamento utilizado",11,MUTED,false),lp(-1,27));root.addView(progress);
+        progress.addView(track,lp(-1,8));progress.addView(text(pct+"% do orçamento utilizado",11,MUTED,false),lp(-1,24));root.addView(progress);
+        long sumBalances=BalanceMath.total(balances.values());TextView totalBalance=text("Saldo total disponível: "+money(sumBalances)+"  ·  Editar em Saldos",12,sumBalances>=spent?GREEN:YELLOW,true);pad(totalBalance,20,0,5,9);root.addView(totalBalance);
         LinearLayout listTitle=row();pad(listTitle,20,0,15,0);listTitle.addView(text("Lista de compras",18,WHITE,true),new LinearLayout.LayoutParams(0,dp(39),1));
         countView=text(draft.length()+" produtos",12,MUTED,false);listTitle.addView(countView);root.addView(listTitle);
         ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.setVerticalScrollBarEnabled(false);listHolder=col();pad(listHolder,14,0,14,8);scroll.addView(listHolder);
@@ -225,14 +228,106 @@ public class MainActivity extends Activity {
         .setPositiveButton("Continuar",(d,w)->{showingAlert=false;})
         .setNeutralButton("Ver pagamentos",(d,w)->{showingAlert=false;checkoutDialog();})
         .setNegativeButton("Revisar lista",(d,w)->{showingAlert=false;}).setOnCancelListener(d->showingAlert=false).show();}
-    private void budgetDialog(){Dialog d=modal("Orçamento e saldos");label(content,"Limite desta compra");EditText b=input("Valor em reais",String.format(pt,"%.2f",budget/100.0),InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);content.addView(b,lp(-1,52));
-        margin(content,text("Você pode definir um limite menor que seu saldo total.",12,MUTED,false),0,7,0,12);
-        LinkedHashMap<String,EditText> edits=new LinkedHashMap<>();for(Map.Entry<String,Long>e:balances.entrySet()){
-            label(content,e.getKey());EditText ed=input("Saldo (R$)",String.format(pt,"%.2f",e.getValue()/100.0),InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);content.addView(ed,lp(-1,49));edits.put(e.getKey(),ed);}
+    private void appendBalanceEditor(LinearLayout target,String name,long value,LinkedHashMap<String,EditText> edits,Runnable refresh){
+        label(target,name);
+        LinearLayout line=row();EditText ed=input("Saldo atual (R$)",String.format(pt,"%.2f",value/100.0),InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        line.addView(ed,new LinearLayout.LayoutParams(0,dp(52),1));
+        Button add=button("＋",PANEL2,GREEN,()->addToBalanceDialog(name,ed,refresh));
+        add.setContentDescription("Adicionar dinheiro ao saldo de "+name);
+        LinearLayout.LayoutParams plusParams=lp(56,52);plusParams.leftMargin=dp(9);line.addView(add,plusParams);
+        margin(target,line,0,0,0,3);edits.put(name,ed);
+        ed.addTextChangedListener(new TextWatcher(){
+            @Override public void beforeTextChanged(CharSequence s,int start,int count,int after){}
+            @Override public void onTextChanged(CharSequence s,int start,int before,int count){refresh.run();}
+            @Override public void afterTextChanged(Editable s){}
+        });
+        refresh.run();
+    }
+    private void addToBalanceDialog(String name,EditText current,Runnable refresh){
+        EditText increment=input("Quanto deseja acrescentar?","",InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        LinearLayout box=col();pad(box,22,10,22,4);
+        box.addView(text("Saldo atual: "+money(Math.max(0,price(current.getText().toString()))),14,WHITE,true));
+        field(box,"Adicionar valor em reais",increment);
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Adicionar saldo · "+name).setView(box)
+            .setPositiveButton("Adicionar",null).setNegativeButton("Cancelar",null).create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            long extra=price(increment.getText().toString());
+            long before=price(current.getText().toString());
+            if(extra<=0){increment.setError("Informe um valor maior que zero");return;}
+            if(before<0){current.setError("Corrija o saldo atual");dialog.dismiss();return;}
+            try{
+                long after=BalanceMath.add(before,extra);
+                current.setText(String.format(pt,"%.2f",after/100.0));refresh.run();dialog.dismiss();
+                toast("Saldo acrescido. Toque em Salvar para confirmar.");
+            }catch(ArithmeticException ex){increment.setError("Valor excede o limite permitido");}
+        });
+    }
+    private void addPaymentSourceDialog(LinearLayout holder,LinkedHashMap<String,EditText> edits,Runnable refresh){
+        EditText name=input("Ex.: Cartão débito, VR extra","",InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        LinearLayout box=col();pad(box,22,10,22,4);field(box,"Nome da nova forma de pagamento",name);
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Nova forma de pagamento").setView(box)
+            .setPositiveButton("Adicionar",null).setNegativeButton("Cancelar",null).create();dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            String key=name.getText().toString().trim();
+            if(key.isEmpty()||key.length()>48){name.setError("Informe um nome de até 48 caracteres");return;}
+            for(String existing:edits.keySet())if(existing.equalsIgnoreCase(key)){name.setError("Essa forma de pagamento já existe");return;}
+            appendBalanceEditor(holder,key,0,edits,refresh);dialog.dismiss();
+            toast("Agora informe o saldo e salve as alterações.");
+        });
+    }
+    private void budgetDialog(){
+        Dialog d=modal("Orçamento e saldos");
+        label(content,"Limite desta compra");
+        EditText b=input("Valor em reais",String.format(pt,"%.2f",budget/100.0),
+            InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        content.addView(b,lp(-1,52));
+        margin(content,text("O orçamento é o limite que você deseja gastar. Ele é independente do dinheiro disponível nas contas.",12,MUTED,false),0,7,0,15);
+        TextView sumTitle=text("SALDO TOTAL DISPONÍVEL",12,MUTED,true);
+        content.addView(sumTitle);
+        TextView liveTotal=text(money(BalanceMath.total(balances.values())),26,GREEN,true);
+        margin(content,liveTotal,0,4,0,4);
+        TextView comparison=text("",12,MUTED,false);margin(content,comparison,0,0,0,13);
+        LinkedHashMap<String,EditText> edits=new LinkedHashMap<>();
+        Runnable refresh=()->{
+            long sum=0;boolean valid=true;
+            for(EditText ed:edits.values()){
+                long v=price(ed.getText().toString());
+                if(v<0){valid=false;continue;}
+                try{sum=Math.addExact(sum,v);}catch(ArithmeticException ex){valid=false;}
+            }
+            if(valid){liveTotal.setText(money(sum));liveTotal.setTextColor(GREEN);}
+            else{liveTotal.setText("Confira os valores");liveTotal.setTextColor(YELLOW);}
+            long selected=price(b.getText().toString());
+            if(selected<0){comparison.setText("Orçamento inválido");comparison.setTextColor(RED);}
+            else if(valid){
+                comparison.setText(sum<selected?"Faltam "+money(selected-sum)+" para cobrir o limite planejado.":"Saldo cobre o orçamento planejado.");
+                comparison.setTextColor(sum<selected?YELLOW:MUTED);
+            }else comparison.setText("Corrija os campos de saldo para somar o total.");
+        };
+        b.addTextChangedListener(new TextWatcher(){
+            @Override public void beforeTextChanged(CharSequence s,int start,int count,int after){}
+            @Override public void onTextChanged(CharSequence s,int start,int before,int count){refresh.run();}
+            @Override public void afterTextChanged(Editable s){}
+        });
+        LinearLayout holder=col();content.addView(holder);
+        for(Map.Entry<String,Long> e:balances.entrySet())appendBalanceEditor(holder,e.getKey(),e.getValue(),edits,refresh);
+        Button custom=button("＋ Nova forma de pagamento",PANEL2,GREEN,()->addPaymentSourceDialog(holder,edits,refresh));
+        margin(content,custom,0,12,0,0);
+        margin(content,text("Edite um campo para definir o saldo ou toque em ＋ para acrescentar dinheiro ao valor atual. Confira a soma acima.",12,MUTED,false),0,11,0,5);
         Button saveButton=button("Salvar orçamento e saldos",GREEN,BG,()->{
-            long value=price(b.getText().toString());if(value<0){toast("Orçamento inválido");return;}
-            LinkedHashMap<String,Long> next=new LinkedHashMap<>();for(Map.Entry<String,EditText>e:edits.entrySet()){long v=price(e.getValue().getText().toString());if(v<0){toast("Saldo inválido: "+e.getKey());return;}next.put(e.getKey(),v);}
-            budget=value;balances.clear();balances.putAll(next);save();d.dismiss();showHome();});margin(content,saveButton,0,17,0,0);
+            long value=price(b.getText().toString());if(value<0){b.setError("Orçamento inválido");return;}
+            LinkedHashMap<String,Long> next=new LinkedHashMap<>();
+            for(Map.Entry<String,EditText> e:edits.entrySet()){
+                long v=price(e.getValue().getText().toString());
+                if(v<0){e.getValue().setError("Saldo inválido");return;}
+                next.put(e.getKey(),v);
+            }
+            try{BalanceMath.total(next.values());}catch(ArithmeticException ex){toast("Saldo total excede o limite permitido");return;}
+            budget=value;balances.clear();balances.putAll(next);save();d.dismiss();showHome();
+            toast("Saldos atualizados: "+money(BalanceMath.total(balances.values())));
+        });margin(content,saveButton,0,15,0,5);
+        refresh.run();
     }
     private void checkoutDialog(){if(draft.length()==0){toast("Adicione algum produto antes de finalizar.");return;}
         Dialog d=modal("Finalizar compra");long total=total();margin(content,text("Total "+money(total),26,GREEN,true),0,9,0,8);
@@ -254,9 +349,11 @@ public class MainActivity extends Activity {
             for(Map.Entry<String,Long>e:vals.entrySet()){long bal=balances.get(e.getKey());if(e.getValue()>bal){
                 new AlertDialog.Builder(this).setTitle("Saldo insuficiente: "+e.getKey()).setMessage("Saldo registrado: "+money(bal)+". Deseja ajustar seus saldos antes de finalizar?")
                 .setPositiveButton("Ajustar",(x,y)->{d.dismiss();budgetDialog();}).setNegativeButton("Voltar",null).show();return;}}
-            try{for(Map.Entry<String,Long>e:vals.entrySet()){pay.put(e.getKey(),e.getValue());balances.put(e.getKey(),balances.get(e.getKey())-e.getValue());}}catch(Exception ignored){}
+            try{for(Map.Entry<String,Long>e:vals.entrySet())pay.put(e.getKey(),e.getValue());}catch(Exception ex){toast("Erro ao registrar pagamentos");return;}
             market=mk.getText().toString().trim();address=adr.getText().toString().trim();
-            db.insert(createdAt,System.currentTimeMillis(),market,address,latitude,longitude,total,budget,pay.toString(),draft.toString());
+            try{db.insert(createdAt,System.currentTimeMillis(),market,address,latitude,longitude,total,budget,pay.toString(),draft.toString());}
+            catch(Exception ex){toast("Falha ao salvar a compra. Saldos preservados.");return;}
+            for(Map.Entry<String,Long>e:vals.entrySet())balances.put(e.getKey(),BalanceMath.debit(balances.get(e.getKey()),e.getValue()));
             draft=new JSONArray();createdAt=System.currentTimeMillis();latitude=null;longitude=null;save();d.dismiss();showHome();toast("Compra registrada com sucesso!");
         });margin(content,finish,0,20,0,0);
     }
