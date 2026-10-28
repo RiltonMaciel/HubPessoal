@@ -10,6 +10,13 @@ android {
         versionCode 2
         versionName '1.0.1-alpha'
     }
+    buildTypes {
+        saldoteste {
+            initWith debug
+            applicationIdSuffix '.saldoteste'
+            versionNameSuffix '-paralelo'
+        }
+    }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
