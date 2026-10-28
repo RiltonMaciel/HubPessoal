@@ -23,6 +23,10 @@ jobs:
             apps/meu-mercado/app/src/main/java/com/meumercado/app/BalanceMath.java \
             apps/meu-mercado/tests/com/meumercado/app/BalanceMathTest.java
           java -cp /tmp/meu-mercado-test com.meumercado.app.BalanceMathTest
+          javac -encoding UTF-8 -cp /tmp/meu-mercado-test -d /tmp/meu-mercado-test \
+            apps/meu-mercado/app/src/main/java/com/meumercado/app/BudgetSummary.java \
+            apps/meu-mercado/tests/com/meumercado/app/BudgetSummaryTest.java
+          java -cp /tmp/meu-mercado-test com.meumercado.app.BudgetSummaryTest
       - name: Verificar SDK Android
         run: ls "$ANDROID_HOME/platforms"
       - uses: gradle/actions/setup-gradle@v4
@@ -48,4 +52,11 @@ jobs:
         with:
           name: MeuMercado-saldos-fix-v1.0.2
           path: apps/meu-mercado/app/build/outputs/apk/saldocorrigido/app-saldocorrigido.apk
+          if-no-files-found: error
+      - name: Compilar Meu Mercado AUTO para instalação paralela
+        run: gradle -p apps/meu-mercado :app:assembleSaldosautomatico --stacktrace --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeuMercado-v1.0.3-Orcamento-Automatico
+          path: apps/meu-mercado/app/build/outputs/apk/saldosautomatico/app-saldosautomatico.apk
           if-no-files-found: error
