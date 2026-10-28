@@ -63,7 +63,7 @@ public class MainActivity extends Activity {
     private JSONArray draft=new JSONArray();
     private long createdAt, budget=30000;
     private final LinkedHashMap<String,Long> balances=new LinkedHashMap<>();
-    private LinearLayout content, listHolder, bar;
+    private LinearLayout content, listHolder, bar, modalFooter;
     private TextView totalView, budgetView, availableView, countView;
     private Dialog currentDialog;
     private ImageView imagePreview;
@@ -176,13 +176,38 @@ public class MainActivity extends Activity {
         }
     }
     private String formatQty(double v){return v==(long)v?String.valueOf((long)v):String.format(pt,"%.3f",v);}
-    private Dialog modal(String title){Dialog d=new Dialog(this);d.requestWindowFeature(Window.FEATURE_NO_TITLE);d.getWindow();
-        LinearLayout shell=col();shell.setBackground(bg(BG,24));pad(shell,19,18,19,18);
-        LinearLayout bar=row();TextView t=text(title,21,WHITE,true);bar.addView(t,new LinearLayout.LayoutParams(0,dp(42),1));
-        Button close=button("✕",PANEL2,WHITE,()->d.dismiss());bar.addView(close,lp(46,42));shell.addView(bar);
-        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(false);scroll.setVerticalScrollBarEnabled(false);content=col();pad(content,0,8,0,5);scroll.addView(content);shell.addView(scroll,new LinearLayout.LayoutParams(-1,-2));
-        d.setContentView(shell);Window w=d.getWindow();if(w!=null){w.setBackgroundDrawableResource(android.R.color.transparent);w.setLayout(-1,-2);w.setGravity(Gravity.BOTTOM);w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);WindowManager.LayoutParams p=w.getAttributes();p.dimAmount=.72f;w.setAttributes(p);}
-        d.setOnDismissListener(dialog->{if(currentDialog==d){currentDialog=null;imagePreview=null;}});d.show();if(w!=null)w.setLayout(-1,-2);currentDialog=d;return d;}
+    private Dialog modal(String title){
+        Dialog d=new Dialog(this);d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout shell=col();shell.setBackground(bg(BG,24));pad(shell,19,18,19,12);
+        LinearLayout header=row();TextView label=text(title,21,WHITE,true);
+        header.addView(label,new LinearLayout.LayoutParams(0,dp(46),1));
+        Button close=button("✕",PANEL2,WHITE,()->d.dismiss());
+        close.setContentDescription("Fechar janela");
+        header.addView(close,lp(46,42));shell.addView(header);
+        ScrollView scroll=new ScrollView(this);
+        scroll.setFillViewport(false);scroll.setVerticalScrollBarEnabled(true);
+        scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        content=col();pad(content,0,8,0,10);scroll.addView(content);
+        // Altura limitada e rolagem SOMENTE na área de formulário.
+        shell.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        modalFooter=col();modalFooter.setBackground(bg(BG,0));
+        modalFooter.setVisibility(View.GONE);
+        shell.addView(modalFooter,new LinearLayout.LayoutParams(-1,-2));
+        d.setContentView(shell);
+        d.setOnDismissListener(dialog->{if(currentDialog==d){currentDialog=null;imagePreview=null;modalFooter=null;}});
+        d.show();
+        Window w=d.getWindow();
+        if(w!=null){
+            w.setBackgroundDrawableResource(android.R.color.transparent);
+            w.setGravity(Gravity.BOTTOM);
+            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            WindowManager.LayoutParams p=w.getAttributes();p.dimAmount=.72f;w.setAttributes(p);
+            int maxPx=Math.min(dp(760),Math.round(getResources().getDisplayMetrics().heightPixels*.87f));
+            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,maxPx);
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        }
+        currentDialog=d;return d;
+    }
     private void productDialog(int index,boolean photo){editingIndex=index;imagePath=index<0?"":draft.optJSONObject(index).optString("image","");
         Dialog d=modal(index<0?"Adicionar produto":"Editar produto");JSONObject i=index<0?new JSONObject():draft.optJSONObject(index);
         LinearLayout photoLine=row();ImageView img=new ImageView(this);img.setBackground(bg(PANEL2,14));img.setScaleType(ImageView.ScaleType.CENTER_CROP);img.setImageResource(android.R.drawable.ic_menu_camera);
@@ -324,9 +349,24 @@ public class MainActivity extends Activity {
                 next.put(e.getKey(),v);
             }
             try{BalanceMath.total(next.values());}catch(ArithmeticException ex){toast("Saldo total excede o limite permitido");return;}
-            budget=value;balances.clear();balances.putAll(next);save();d.dismiss();showHome();
-            toast("Saldos atualizados: "+money(BalanceMath.total(balances.values())));
-        });margin(content,saveButton,0,15,0,5);
+            // Salva de modo síncrono: a confirmação só aparece após persistir.
+            JSONObject serialized=new JSONObject();
+            try{for(Map.Entry<String,Long> e:next.entrySet())serialized.put(e.getKey(),e.getValue());}
+            catch(Exception ex){toast("Não foi possível preparar os saldos para salvar.");return;}
+            boolean stored=pref.edit().putLong("budget",value).putString("balances",serialized.toString()).commit();
+            if(!stored){
+                toast("Falha ao salvar. Os valores permanecem no formulário.");
+                return;
+            }
+            budget=value;balances.clear();balances.putAll(next);
+            d.dismiss();showHome();
+            toast("SALVO: orçamento "+money(budget)+" • saldos "+money(BalanceMath.total(balances.values())));
+        });
+        // Botão fixo: nunca fica oculto abaixo dos saldos ou do teclado.
+        modalFooter.setVisibility(View.VISIBLE);
+        margin(modalFooter,text("Confirme para guardar os valores neste aparelho.",11,MUTED,false),0,6,0,7);
+        margin(modalFooter,saveButton,0,0,0,0);
+        saveButton.setMinHeight(dp(54));
         refresh.run();
     }
     private void checkoutDialog(){if(draft.length()==0){toast("Adicione algum produto antes de finalizar.");return;}
