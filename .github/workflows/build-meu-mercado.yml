@@ -16,10 +16,15 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Verificar SDK Android do runner
+      - name: Testes de saldos e pagamentos
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME/platforms" || true
+          mkdir -p /tmp/meu-mercado-test
+          javac -encoding UTF-8 -d /tmp/meu-mercado-test \
+            apps/meu-mercado/app/src/main/java/com/meumercado/app/BalanceMath.java \
+            apps/meu-mercado/tests/com/meumercado/app/BalanceMathTest.java
+          java -cp /tmp/meu-mercado-test com.meumercado.app.BalanceMathTest
+      - name: Verificar SDK Android
+        run: ls "$ANDROID_HOME/platforms"
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
