@@ -28,6 +28,8 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.content.res.ColorStateList;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -62,6 +64,7 @@ public class MainActivity extends Activity {
     private Store db;
     private JSONArray draft=new JSONArray();
     private long createdAt, budget=30000;
+    private boolean autoBudget=true;
     private final LinkedHashMap<String,Long> balances=new LinkedHashMap<>();
     private LinearLayout content, listHolder, bar, modalFooter;
     private TextView totalView, budgetView, availableView, countView;
@@ -92,7 +95,7 @@ public class MainActivity extends Activity {
     }
     private void load(){
         try{draft=new JSONArray(pref.getString("draft","[]"));}catch(Exception e){draft=new JSONArray();}
-        budget=pref.getLong("budget",30000);createdAt=pref.getLong("created",System.currentTimeMillis());
+        budget=pref.getLong("budget",30000);autoBudget=pref.getBoolean("auto_budget",true);createdAt=pref.getLong("created",System.currentTimeMillis());
         if(pref.contains("balances")){try{JSONObject o=new JSONObject(pref.getString("balances","{}"));for(String k:balances.keySet())if(o.has(k))balances.put(k,Math.max(0,o.optLong(k)));java.util.Iterator<String> keys=o.keys();while(keys.hasNext()){String k=keys.next();if(!balances.containsKey(k))balances.put(k,Math.max(0,o.optLong(k)));}}catch(Exception ignored){}}
         market=pref.getString("market","");address=pref.getString("address","");
         if(pref.contains("lat")){latitude=Double.longBitsToDouble(pref.getLong("lat",0));longitude=Double.longBitsToDouble(pref.getLong("lng",0));}
@@ -100,7 +103,7 @@ public class MainActivity extends Activity {
     private void save(){
         JSONObject b=new JSONObject();try{for(Map.Entry<String,Long>e:balances.entrySet())b.put(e.getKey(),e.getValue());}catch(Exception ignored){}
         SharedPreferences.Editor ed=pref.edit().putString("draft",draft.toString()).putLong("budget",budget).putLong("created",createdAt)
-                .putString("balances",b.toString()).putString("market",market).putString("address",address);
+                .putString("balances",b.toString()).putBoolean("auto_budget",autoBudget).putString("market",market).putString("address",address);
         if(latitude!=null&&longitude!=null)ed.putLong("lat",Double.doubleToLongBits(latitude)).putLong("lng",Double.doubleToLongBits(longitude));
         else ed.remove("lat").remove("lng");
         ed.apply();
@@ -126,6 +129,8 @@ public class MainActivity extends Activity {
     private long itemTotal(JSONObject i){return Math.round(i.optLong("price")*i.optDouble("qty",1));}
     private long total(){long v=0;for(int n=0;n<draft.length();n++)v+=itemTotal(draft.optJSONObject(n));return v;}
     private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_SHORT).show();}
+    private long effectiveBudget(){return autoBudget?BalanceMath.total(balances.values()):budget;}
+    private String formatCents(long cents){return String.format(pt,"%.2f",cents/100.0);}
     private void header(LinearLayout p,String heading,String sub){
         LinearLayout top=row();TextView icon=center("🛒",28,GREEN,true);top.addView(icon,lp(47,48));
         LinearLayout titles=col();titles.addView(text(heading,22,WHITE,true));titles.addView(text(sub,11,MUTED,false));top.addView(titles,new LinearLayout.LayoutParams(0,-2,1));
@@ -137,22 +142,24 @@ public class MainActivity extends Activity {
         LinearLayout root=col();root.setBackgroundColor(BG);setContentView(root);
         header(root,"Meu Mercado","Sua compra sob controle");
         LinearLayout metrics=row();pad(metrics,13,0,13,0);
-        long spent=total();budgetView=text(money(budget),15,WHITE,true);totalView=text(money(spent),15,RED,true);availableView=text(money(budget-spent),15,budget>=spent?GREEN:RED,true);
+        BudgetSummary.Snapshot summary=BudgetSummary.calculate(balances.values(),autoBudget,budget,total());
+        long spent=summary.spent;long activeBudget=summary.budget;
+        budgetView=text(money(summary.budget),15,WHITE,true);totalView=text(money(summary.spent),15,RED,true);availableView=text(money(summary.remaining),15,summary.remaining>=0?GREEN:RED,true);
         String[] names={"ORÇAMENTO","GASTO","RESTANTE"};TextView[] views={budgetView,totalView,availableView};
         for(int j=0;j<3;j++){LinearLayout c=col();c.setBackground(bg(PANEL,12));pad(c,8,11,7,11);c.addView(text(names[j],10,MUTED,false));margin(c,views[j],0,7,0,0);
             LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(71),1);p.setMargins(dp(3),0,dp(3),0);metrics.addView(c,p);}
         root.addView(metrics,lp(-1,-2));
         LinearLayout progress=col();pad(progress,20,13,20,0);LinearLayout track=row();track.setBackground(bg(PANEL2,5));
-        long pct=budget>0?Math.min(100,Math.max(0,spent*100/budget)):(spent>0?100:0);
-        View fill=new View(this);fill.setBackground(bg(spent>budget?RED:GREEN,5));track.addView(fill,new LinearLayout.LayoutParams(0,dp(8),pct));track.addView(new View(this),new LinearLayout.LayoutParams(0,dp(8),100-pct));
+        long pct=activeBudget>0?Math.min(100,Math.max(0,Math.round((double)spent*100/activeBudget))):(spent>0?100:0);
+        View fill=new View(this);fill.setBackground(bg(spent>activeBudget?RED:GREEN,5));track.addView(fill,new LinearLayout.LayoutParams(0,dp(8),pct));track.addView(new View(this),new LinearLayout.LayoutParams(0,dp(8),100-pct));
         progress.addView(track,lp(-1,8));progress.addView(text(pct+"% do orçamento utilizado",11,MUTED,false),lp(-1,24));root.addView(progress);
-        long sumBalances=BalanceMath.total(balances.values());TextView totalBalance=text("Saldo total disponível: "+money(sumBalances)+"  ·  Editar em Saldos",12,sumBalances>=spent?GREEN:YELLOW,true);pad(totalBalance,20,0,5,9);root.addView(totalBalance);
+        long sumBalances=summary.totalBalances;TextView totalBalance=text((autoBudget?"Orçamento automático · ":"Orçamento manual · ")+"Saldos: "+money(sumBalances),12,sumBalances>=spent?GREEN:YELLOW,true);pad(totalBalance,20,0,5,9);root.addView(totalBalance);
         LinearLayout listTitle=row();pad(listTitle,20,0,15,0);listTitle.addView(text("Lista de compras",18,WHITE,true),new LinearLayout.LayoutParams(0,dp(39),1));
         countView=text(draft.length()+" produtos",12,MUTED,false);listTitle.addView(countView);root.addView(listTitle);
         ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.setVerticalScrollBarEnabled(false);listHolder=col();pad(listHolder,14,0,14,8);scroll.addView(listHolder);
         root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));rebuildList();
         LinearLayout foot=col();foot.setBackground(bg(PANEL,19));pad(foot,15,11,15,12);
-        LinearLayout totals=row();totals.addView(text("Total da compra",13,MUTED,false),new LinearLayout.LayoutParams(0,dp(35),1));totals.addView(text(money(spent),23,spent>budget?RED:GREEN,true));foot.addView(totals);
+        LinearLayout totals=row();totals.addView(text("Total da compra",13,MUTED,false),new LinearLayout.LayoutParams(0,dp(35),1));totals.addView(text(money(spent),23,spent>activeBudget?RED:GREEN,true));foot.addView(totals);
         LinearLayout actions=row();Button photo=button("📷 Foto",PANEL2,WHITE,()->productDialog(-1,true));Button add=button("＋ Adicionar produto",GREEN,BG,()->productDialog(-1,false));
         actions.addView(photo,new LinearLayout.LayoutParams(0,dp(52),1));LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(0,dp(52),2);ap.setMargins(dp(8),0,0,0);actions.addView(add,ap);foot.addView(actions);
         Button checkout=button("✓ Finalizar compra",PANEL2,GREEN,()->checkoutDialog());margin(foot,checkout,0,8,0,0);
@@ -238,7 +245,7 @@ public class MainActivity extends Activity {
         JSONObject o=new JSONObject();try{o.put("name",name);o.put("price",cost);o.put("qty",qty);o.put("unit",selectedUnit);o.put("image",imagePath);}catch(JSONException ignored){}
         long oldTotal=total();if(index<0)draft.put(o);else{try{draft.put(index,o);}catch(JSONException ignored){}}
         save();if(currentDialog!=null)currentDialog.dismiss();showHome();
-        if(oldTotal<=budget && total()>budget && !showingAlert)overspendAlert();
+        if(oldTotal<=effectiveBudget() && total()>effectiveBudget() && !showingAlert)overspendAlert();
     }
     private void startCamera(){try{Intent intent=new Intent(MediaStore.ACTION_IMAGE_CAPTURE);startActivityForResult(intent,CAMERA_REQ);}catch(Exception e){toast("Não foi possível abrir a câmera.");}}
     private void openGallery(){try{Intent intent=new Intent(Intent.ACTION_GET_CONTENT);intent.setType("image/*");startActivityForResult(Intent.createChooser(intent,"Escolher imagem"),GALLERY_REQ);}catch(Exception e){toast("Não foi possível abrir a galeria.");}}
@@ -249,7 +256,7 @@ public class MainActivity extends Activity {
             try(FileOutputStream output=openFileOutput(id,MODE_PRIVATE)){scaled.compress(Bitmap.CompressFormat.JPEG,85,output);}imagePath=id;if(imagePreview!=null)imagePreview.setImageBitmap(scaled);toast("Foto adicionada.");}
     }catch(Exception e){toast("Não foi possível salvar a fotografia.");}}
     private void overspendAlert(){showingAlert=true;new AlertDialog.Builder(this).setTitle("⚠ Orçamento ultrapassado")
-        .setMessage("Você passou "+money(total()-budget)+" do limite. Pode continuar, ajustar a lista ou finalizar informando como pagará a diferença.")
+        .setMessage("Você passou "+money(total()-effectiveBudget())+" do limite. Pode continuar, ajustar a lista ou finalizar informando como pagará a diferença.")
         .setPositiveButton("Continuar",(d,w)->{showingAlert=false;})
         .setNeutralButton("Ver pagamentos",(d,w)->{showingAlert=false;checkoutDialog();})
         .setNegativeButton("Revisar lista",(d,w)->{showingAlert=false;}).setOnCancelListener(d->showingAlert=false).show();}
@@ -303,16 +310,24 @@ public class MainActivity extends Activity {
     }
     private void budgetDialog(){
         Dialog d=modal("Orçamento e saldos");
-        label(content,"Limite desta compra");
-        EditText b=input("Valor em reais",String.format(pt,"%.2f",budget/100.0),
-            InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        CheckBox automatic=new CheckBox(this);
+        automatic.setText("Usar soma dos saldos como orçamento");
+        automatic.setTextColor(WHITE);automatic.setTextSize(15);
+        automatic.setButtonTintList(ColorStateList.valueOf(GREEN));
+        automatic.setChecked(autoBudget);
+        content.addView(automatic,lp(-1,52));
+        margin(content,text("Ativado: o orçamento, o restante e o indicador de progresso se ajustam quando os saldos mudam.",12,MUTED,false),0,0,0,10);
+        label(content,"Orçamento da compra");
+        EditText b=input("Valor em reais",formatCents(effectiveBudget()),InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        b.setEnabled(!autoBudget);b.setAlpha(autoBudget?.75f:1f);
         content.addView(b,lp(-1,52));
-        margin(content,text("O orçamento é o limite que você deseja gastar. Ele é independente do dinheiro disponível nas contas.",12,MUTED,false),0,7,0,15);
-        TextView sumTitle=text("SALDO TOTAL DISPONÍVEL",12,MUTED,true);
-        content.addView(sumTitle);
+        margin(content,text("Desative a opção acima para definir um limite de gastos manual menor que seu saldo.",12,MUTED,false),0,7,0,15);
+        content.addView(text("SALDO TOTAL DISPONÍVEL",12,MUTED,true));
         TextView liveTotal=text(money(BalanceMath.total(balances.values())),26,GREEN,true);
         margin(content,liveTotal,0,4,0,4);
         TextView comparison=text("",12,MUTED,false);margin(content,comparison,0,0,0,13);
+        TextView preview=text("",14,GREEN,true);
+        margin(content,preview,0,0,0,15);
         LinkedHashMap<String,EditText> edits=new LinkedHashMap<>();
         Runnable refresh=()->{
             long sum=0;boolean valid=true;
@@ -321,57 +336,72 @@ public class MainActivity extends Activity {
                 if(v<0){valid=false;continue;}
                 try{sum=Math.addExact(sum,v);}catch(ArithmeticException ex){valid=false;}
             }
-            if(valid){liveTotal.setText(money(sum));liveTotal.setTextColor(GREEN);}
-            else{liveTotal.setText("Confira os valores");liveTotal.setTextColor(YELLOW);}
-            long selected=price(b.getText().toString());
-            if(selected<0){comparison.setText("Orçamento inválido");comparison.setTextColor(RED);}
-            else if(valid){
-                comparison.setText(sum<selected?"Faltam "+money(selected-sum)+" para cobrir o limite planejado.":"Saldo cobre o orçamento planejado.");
-                comparison.setTextColor(sum<selected?YELLOW:MUTED);
-            }else comparison.setText("Corrija os campos de saldo para somar o total.");
+            if(!valid){
+                liveTotal.setText("Confira os valores");liveTotal.setTextColor(YELLOW);
+                comparison.setText("Corrija os valores dos saldos antes de salvar.");
+                preview.setText("Prévia indisponível");return;
+            }
+            liveTotal.setText(money(sum));liveTotal.setTextColor(GREEN);
+            long activeBudget;
+            if(automatic.isChecked()){
+                activeBudget=sum;
+                String displayed=formatCents(sum);
+                if(!b.getText().toString().equals(displayed))b.setText(displayed);
+                b.setEnabled(false);b.setAlpha(.75f);
+            }else{
+                b.setEnabled(true);b.setAlpha(1f);
+                activeBudget=price(b.getText().toString());
+            }
+            if(activeBudget<0){comparison.setText("Orçamento inválido");comparison.setTextColor(RED);preview.setText("Informe um orçamento válido.");return;}
+            comparison.setText(automatic.isChecked()?"Orçamento acompanha os saldos automaticamente.":"Orçamento manual independente dos saldos.");
+            comparison.setTextColor(MUTED);
+            preview.setText("Na tela principal: orçamento "+money(activeBudget)+"  •  restante "+money(activeBudget-total()));
         };
         b.addTextChangedListener(new TextWatcher(){
             @Override public void beforeTextChanged(CharSequence s,int start,int count,int after){}
             @Override public void onTextChanged(CharSequence s,int start,int before,int count){refresh.run();}
             @Override public void afterTextChanged(Editable s){}
         });
+        automatic.setOnCheckedChangeListener((button,checked)->{
+            if(!checked){b.setEnabled(true);b.setText(formatCents(budget));}
+            refresh.run();
+        });
         LinearLayout holder=col();content.addView(holder);
         for(Map.Entry<String,Long> e:balances.entrySet())appendBalanceEditor(holder,e.getKey(),e.getValue(),edits,refresh);
         Button custom=button("＋ Nova forma de pagamento",PANEL2,GREEN,()->addPaymentSourceDialog(holder,edits,refresh));
         margin(content,custom,0,12,0,0);
-        margin(content,text("Edite um campo para definir o saldo ou toque em ＋ para acrescentar dinheiro ao valor atual. Confira a soma acima.",12,MUTED,false),0,11,0,5);
-        Button saveButton=button("Salvar orçamento e saldos",GREEN,BG,()->{
-            long value=price(b.getText().toString());if(value<0){b.setError("Orçamento inválido");return;}
+        margin(content,text("Edite um campo para substituir o saldo ou toque em ＋ para acrescentar dinheiro.",12,MUTED,false),0,11,0,5);
+        Button saveButton=button("SALVAR ORÇAMENTO E SALDOS",GREEN,BG,()->{
             LinkedHashMap<String,Long> next=new LinkedHashMap<>();
             for(Map.Entry<String,EditText> e:edits.entrySet()){
                 long v=price(e.getValue().getText().toString());
                 if(v<0){e.getValue().setError("Saldo inválido");return;}
                 next.put(e.getKey(),v);
             }
-            try{BalanceMath.total(next.values());}catch(ArithmeticException ex){toast("Saldo total excede o limite permitido");return;}
-            // Salva de modo síncrono: a confirmação só aparece após persistir.
+            long sum;
+            try{sum=BalanceMath.total(next.values());}catch(ArithmeticException ex){toast("Saldo total excede o limite permitido");return;}
+            boolean useAuto=automatic.isChecked();
+            long manualValue=useAuto?budget:price(b.getText().toString());
+            if(manualValue<0){b.setError("Orçamento inválido");return;}
             JSONObject serialized=new JSONObject();
             try{for(Map.Entry<String,Long> e:next.entrySet())serialized.put(e.getKey(),e.getValue());}
-            catch(Exception ex){toast("Não foi possível preparar os saldos para salvar.");return;}
-            boolean stored=pref.edit().putLong("budget",value).putString("balances",serialized.toString()).commit();
-            if(!stored){
-                toast("Falha ao salvar. Os valores permanecem no formulário.");
-                return;
-            }
-            budget=value;balances.clear();balances.putAll(next);
+            catch(Exception ex){toast("Não foi possível preparar os saldos.");return;}
+            boolean stored=pref.edit().putLong("budget",manualValue).putBoolean("auto_budget",useAuto)
+                .putString("balances",serialized.toString()).commit();
+            if(!stored){toast("Falha ao salvar. Os dados continuam no formulário.");return;}
+            budget=manualValue;autoBudget=useAuto;balances.clear();balances.putAll(next);
             d.dismiss();showHome();
-            toast("SALVO: orçamento "+money(budget)+" • saldos "+money(BalanceMath.total(balances.values())));
+            toast("SALVO! Orçamento: "+money(useAuto?sum:manualValue)+" • Saldo total: "+money(sum));
         });
-        // Botão fixo: nunca fica oculto abaixo dos saldos ou do teclado.
         modalFooter.setVisibility(View.VISIBLE);
-        margin(modalFooter,text("Confirme para guardar os valores neste aparelho.",11,MUTED,false),0,6,0,7);
+        margin(modalFooter,text("Os valores serão aplicados à tela principal após salvar.",11,MUTED,false),0,5,0,7);
         margin(modalFooter,saveButton,0,0,0,0);
         saveButton.setMinHeight(dp(54));
         refresh.run();
     }
     private void checkoutDialog(){if(draft.length()==0){toast("Adicione algum produto antes de finalizar.");return;}
         Dialog d=modal("Finalizar compra");long total=total();margin(content,text("Total "+money(total),26,GREEN,true),0,9,0,8);
-        if(total>budget){TextView t=text("Você passou "+money(total-budget)+" do orçamento. Informe como pagará a compra, incluindo o excedente.",13,RED,true);margin(content,t,0,0,0,12);}
+        if(total>effectiveBudget()){TextView t=text("Você passou "+money(total-effectiveBudget())+" do orçamento. Informe como pagará a compra, incluindo o excedente.",13,RED,true);margin(content,t,0,0,0,12);}
         LinkedHashMap<String,EditText> edits=new LinkedHashMap<>();long remaining=total;
         for(Map.Entry<String,Long>e:balances.entrySet()){
             long portion=Math.min(Math.max(0,e.getValue()),remaining);remaining-=portion;
@@ -391,7 +421,7 @@ public class MainActivity extends Activity {
                 .setPositiveButton("Ajustar",(x,y)->{d.dismiss();budgetDialog();}).setNegativeButton("Voltar",null).show();return;}}
             try{for(Map.Entry<String,Long>e:vals.entrySet())pay.put(e.getKey(),e.getValue());}catch(Exception ex){toast("Erro ao registrar pagamentos");return;}
             market=mk.getText().toString().trim();address=adr.getText().toString().trim();
-            try{db.insert(createdAt,System.currentTimeMillis(),market,address,latitude,longitude,total,budget,pay.toString(),draft.toString());}
+            try{db.insert(createdAt,System.currentTimeMillis(),market,address,latitude,longitude,total,effectiveBudget(),pay.toString(),draft.toString());}
             catch(Exception ex){toast("Falha ao salvar a compra. Saldos preservados.");return;}
             for(Map.Entry<String,Long>e:vals.entrySet())balances.put(e.getKey(),BalanceMath.debit(balances.get(e.getKey()),e.getValue()));
             draft=new JSONArray();createdAt=System.currentTimeMillis();latitude=null;longitude=null;save();d.dismiss();showHome();toast("Compra registrada com sucesso!");
